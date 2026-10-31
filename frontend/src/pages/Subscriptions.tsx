@@ -103,6 +103,12 @@ export const Subscriptions: React.FC = () => {
   const [lines, setLines] = useState<FormLine[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [quickPlanOpen, setQuickPlanOpen] = useState(false);
+  const [quickPlanName, setQuickPlanName] = useState('');
+  const [quickPlanInterval, setQuickPlanInterval] = useState<'monthly' | 'yearly' | 'weekly' | 'daily'>('monthly');
+  const [quickPlanPrice, setQuickPlanPrice] = useState('1000');
+  const [quickPlanMinQty, setQuickPlanMinQty] = useState('1');
+  const [savingQuickPlan, setSavingQuickPlan] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
