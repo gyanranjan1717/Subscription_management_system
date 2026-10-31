@@ -123,3 +123,45 @@ test('email: OTP, reset and invoice emails are recorded with a delivery status',
   assert.ok(rows.length > 0);
   for (const r of rows) assert.ok(['sent', 'simulated', 'failed'].includes(r.delivery_status), `status ${r.delivery_status}`);
 });
+
+test('email: in production codes stay hidden unless DEMO_MODE is on, and a real provider always wins', async () => {
+  const keys = ['NODE_ENV', 'DEMO_MODE', 'BREVO_API_KEY', 'MAIL_FROM'] as const;
+  const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+  const realFetch = globalThis.fetch;
+  const brevoCalls: any[] = [];
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.DEMO_MODE;
+
+    const hidden = await api('POST', '/auth/send-otp', null, { email: 'prod.hidden@example.com' });
+    assert.equal(hidden.status, 200);
+    assert.equal(hidden.body.otpPreview, undefined, 'production without DEMO_MODE never reveals the code');
+
+    process.env.DEMO_MODE = 'true';
+    const demo = await api('POST', '/auth/send-otp', null, { email: 'prod.demo@example.com' });
+    assert.match(demo.body.otpPreview, /^\d{6}$/, 'DEMO_MODE shows the code on screen when no email service exists');
+
+    // With a real provider configured the code goes by email only, even in demo mode.
+    process.env.BREVO_API_KEY = 'xkeysib-test-key-0123456789abcdef';
+    process.env.MAIL_FROM = '"Brightloop" <sender@example.com>';
+    globalThis.fetch = (async (url: any, init: any) => {
+      if (String(url).startsWith('https://api.brevo.com/')) {
+        brevoCalls.push(JSON.parse(init.body));
+        return new Response('{}', { status: 201 });
+      }
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const real = await api('POST', '/auth/send-otp', null, { email: 'prod.real@example.com' });
+    assert.equal(real.status, 200);
+    assert.equal(real.body.otpPreview, undefined);
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(brevoCalls.length, 1);
+    assert.deepEqual(brevoCalls[0].to, [{ email: 'prod.real@example.com' }]);
+    assert.deepEqual(brevoCalls[0].sender, { name: 'Brightloop', email: 'sender@example.com' });
+    assert.match(brevoCalls[0].textContent, /\b\d{6}\b/);
+    assert.equal(queryOne<any>("SELECT delivery_status FROM email_outbox WHERE to_email = 'prod.real@example.com'").delivery_status, 'sent');
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+});

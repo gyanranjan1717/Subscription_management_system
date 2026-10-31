@@ -528,7 +528,7 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
                     <div className="flex items-center justify-between">
                       <span className="font-semibold flex items-center gap-1">
                         <Sparkles className="w-3.5 h-3.5 text-brand-600" />
-                        Local demo mode (no email server):
+                        Demo mode (no email service connected):
                       </span>
                       <button
                         type="button"

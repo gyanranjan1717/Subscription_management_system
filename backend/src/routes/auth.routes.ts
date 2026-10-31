@@ -6,7 +6,7 @@ import { validatePassword, generateToken, authenticate, requireRole, rateLimit, 
 import { conflict, badRequest, handle, isUniqueViolation } from '../lib/errors.js';
 import { asBody, email as emailField, reqStr, str } from '../lib/validation.js';
 import { audit } from '../services/audit.js';
-import { appUrl, queueEmail, smtpConfigured } from '../services/mailer.js';
+import { appUrl, queueEmail, showCodesOnScreen } from '../services/mailer.js';
 
 export const authRouter = Router();
 
@@ -16,7 +16,7 @@ const GENERIC_RESET_MESSAGE = 'If the email is registered, a password reset link
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
 const exposeResetLink = () =>
-  process.env.EXPOSE_RESET_LINK ? process.env.EXPOSE_RESET_LINK === 'true' : process.env.NODE_ENV !== 'production' && !smtpConfigured();
+  process.env.EXPOSE_RESET_LINK && process.env.NODE_ENV !== 'production' ? process.env.EXPOSE_RESET_LINK === 'true' : showCodesOnScreen();
 
 
 function limit(req: Request, scope: string, email: string): void {
@@ -56,9 +56,8 @@ async function createUser(
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 
-/** Codes are only echoed back in non-production when no SMTP server is configured (local demo "inbox"). */
-const exposeDevCodes = () =>
-  process.env.NODE_ENV !== 'production' && !smtpConfigured() && process.env.EXPOSE_DEV_CODES !== 'false';
+/** Codes are echoed back only when no email channel exists (local demo, or DEMO_MODE=true in production). */
+const exposeDevCodes = () => showCodesOnScreen();
 
 /** Admin self-registration exists only when the operator sets a strong key in the environment. */
 function adminKeyMatches(candidate: string): boolean {
