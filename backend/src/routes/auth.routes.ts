@@ -6,6 +6,7 @@ import { validatePassword, generateToken, authenticate, requireRole, rateLimit, 
 import { conflict, badRequest, handle, isUniqueViolation } from '../lib/errors.js';
 import { asBody, email as emailField, reqStr, str } from '../lib/validation.js';
 import { audit } from '../services/audit.js';
+import { sendEmail } from '../services/mailer.js';
 
 export const authRouter = Router();
 
@@ -77,6 +78,23 @@ authRouter.post('/send-otp', handle(async (req, res) => {
     );
     audit('OTP_DISPATCHED', `Verification OTP generated for ${email}`, null, { email });
   });
+
+  // Dispatch real email if SMTP configured (runs asynchronously)
+  sendEmail({
+    to: email,
+    subject: 'Your Brightloop Verification Code',
+    text: `Your 6-digit Brightloop verification code is: ${otpCode}. It expires in 10 minutes.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <h2 style="color: #0f172a; margin-bottom: 8px;">Brightloop Account Verification</h2>
+        <p style="color: #475569; font-size: 14px;">Use the following 6-digit code to complete your registration:</p>
+        <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; padding: 16px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1e293b; margin: 20px 0;">
+          ${otpCode}
+        </div>
+        <p style="color: #64748b; font-size: 12px;">This code will expire in 10 minutes. If you did not request this, you can safely ignore this email.</p>
+      </div>
+    `
+  }).catch(() => {});
 
   res.json({
     success: true,
@@ -191,6 +209,23 @@ authRouter.post('/forgot-password', handle(async (req, res) => {
       );
       audit('PASSWORD_RESET_DISPATCHED', `Password reset email queued for ${user.email}`, user.id, { expiresAt });
     });
+
+    sendEmail({
+      to: user.email,
+      subject: 'Reset your Brightloop password',
+      text: `Use this link within 30 minutes to reset your password: http://localhost:3000${resetUrl}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
+          <h2 style="color: #0f172a; margin-bottom: 8px;">Reset Your Password</h2>
+          <p style="color: #475569; font-size: 14px;">You requested a password reset for your Brightloop account.</p>
+          <div style="margin: 20px 0; text-align: center;">
+            <a href="http://localhost:3000${resetUrl}" style="background-color: #0284c7; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Reset Password</a>
+          </div>
+          <p style="color: #64748b; font-size: 12px;">Token: <code>${token}</code> (Expires in 30 minutes)</p>
+        </div>
+      `
+    }).catch(() => {});
+
     // Dev convenience only (the "inbox"): never enabled in production.
     if (exposeResetLink()) {
       body.resetToken = token;
