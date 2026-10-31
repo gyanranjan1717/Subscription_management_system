@@ -241,6 +241,27 @@ export const api = {
     return request('/payments', { method: 'POST', body: JSON.stringify(body) });
   },
 
+  async createRazorpayOrder(invoiceId: number): Promise<{
+    orderId: string;
+    invoiceId: number;
+    invoiceNumber: string;
+    amountPaise: number;
+    amountInr: number;
+    currency: string;
+    keyId: string;
+  }> {
+    return request('/payments/razorpay/create-order', { method: 'POST', body: JSON.stringify({ invoice_id: invoiceId }) });
+  },
+
+  async verifyRazorpayPayment(body: {
+    invoice_id: number;
+    razorpay_order_id: string;
+    razorpay_payment_id: string;
+    razorpay_signature?: string;
+  }): Promise<any> {
+    return request('/payments/razorpay/verify-payment', { method: 'POST', body: JSON.stringify(body) });
+  },
+
   // Analytics
   async getSummary(range?: { from?: string; to?: string }): Promise<{ metrics: DashboardMetrics; planBreakdown: any[]; overdueInvoices: any[]; recentEvents: any[] }> {
     const qs = new URLSearchParams();

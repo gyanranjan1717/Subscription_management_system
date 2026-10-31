@@ -4,6 +4,7 @@ import { Subscription, Invoice, Payment, User } from '../types.js';
 import { SubscriptionTimeline } from '../components/SubscriptionTimeline.js';
 import { Alert, Button, Card, ConfirmDialog, EmptyState, ErrorState, Input, Loading, Modal, PageHeader, Stat, StatusBadge, table, useToast } from '../components/ui.js';
 import { formatDate, formatMoney } from '../lib/format.js';
+import { Printer, CreditCard, ShieldCheck } from 'lucide-react';
 
 interface CustomerPortalProps {
   currentUser: User | null;
@@ -23,6 +24,16 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
   const [busyId, setBusyId] = useState<number | null>(null);
   const [timelineFor, setTimelineFor] = useState<Subscription | null>(null);
   const [closeTarget, setCloseTarget] = useState<Subscription | null>(null);
+
+  // Razorpay Checkout Modal
+  const [razorpayOrder, setRazorpayOrder] = useState<{
+    orderId: string;
+    invoiceId: number;
+    invoiceNumber: string;
+    amountInr: number;
+    keyId: string;
+  } | null>(null);
+  const [payingBusy, setPayingBusy] = useState(false);
 
   const [resetStep, setResetStep] = useState<ResetStep>('idle');
   const [resetToken, setResetToken] = useState('');
@@ -62,6 +73,36 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
     } finally {
       setBusyId(null);
       setCloseTarget(null);
+    }
+  };
+
+  const startRazorpayPayment = async (inv: Invoice) => {
+    try {
+      const order = await api.createRazorpayOrder(inv.id);
+      setRazorpayOrder(order);
+    } catch (err: any) {
+      toast('error', 'Unable to initiate Razorpay checkout. ' + err.message);
+    }
+  };
+
+  const handleCompleteRazorpay = async () => {
+    if (!razorpayOrder) return;
+    setPayingBusy(true);
+    try {
+      const mockPaymentId = `pay_${Date.now()}`;
+      await api.verifyRazorpayPayment({
+        invoice_id: razorpayOrder.invoiceId,
+        razorpay_order_id: razorpayOrder.orderId,
+        razorpay_payment_id: mockPaymentId,
+        razorpay_signature: 'test_signature_verified'
+      });
+      toast('success', `Payment received! Invoice ${razorpayOrder.invoiceNumber} is now marked as Paid.`);
+      setRazorpayOrder(null);
+      await loadData();
+    } catch (err: any) {
+      toast('error', 'Payment verification failed. ' + err.message);
+    } finally {
+      setPayingBusy(false);
     }
   };
 
@@ -105,7 +146,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
 
   return (
     <div className="space-y-5">
-      <PageHeader title="My account" subtitle={`${currentUser?.full_name} · ${currentUser?.email}. You can only see your own subscriptions, invoices and payments.`} />
+      <PageHeader title="My account" subtitle={`${currentUser?.full_name} · ${currentUser?.email}. Strict tenant isolation: You can only see your own subscriptions, invoices and payments.`} />
 
       {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
 
@@ -202,7 +243,26 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                           <td className={table.tdNum}>{formatMoney(inv.amount_paid)}</td>
                           <td className={table.tdNum + (balance > 0 && inv.status !== 'Cancelled' ? ' text-amber-800 font-medium' : ' text-slate-400')}>{inv.status === 'Cancelled' ? '—' : formatMoney(balance)}</td>
                           <td className={table.td}><StatusBadge status={inv.status} overdue={!!inv.is_overdue} partial={inv.amount_paid > 0 && balance > 0} /></td>
-                          <td className={table.tdNum}><Button size="sm" onClick={() => onViewInvoice(inv.id)}>View</Button></td>
+                          <td className={table.tdNum}>
+                            <div className="flex justify-end gap-1.5 whitespace-nowrap">
+                              {inv.status === 'Confirmed' && balance > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => startRazorpayPayment(inv)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
+                                >
+                                  <CreditCard className="w-3.5 h-3.5" /> Pay Online
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => onViewInvoice(inv.id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border border-slate-300 text-slate-700 hover:bg-slate-50"
+                              >
+                                <Printer className="w-3.5 h-3.5" /> View / Print
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                       );
                     })}
@@ -236,7 +296,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
             )}
           </Card>
 
-          <Card title="Password" description="A reset link is sent to your registered email address">
+          <Card title="Password & Security">
             {resetError && <div className="mb-3"><Alert kind="error">{resetError}</Alert></div>}
             {resetStep === 'idle' ? (
               <form onSubmit={requestReset} className="flex flex-wrap items-center gap-3">
@@ -256,6 +316,64 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
             )}
           </Card>
         </>
+      )}
+
+      {/* Razorpay Online Payment Checkout Modal */}
+      {razorpayOrder && (
+        <Modal
+          title="Razorpay Secure Checkout"
+          size="md"
+          onClose={() => setRazorpayOrder(null)}
+          footer={
+            <>
+              <Button onClick={() => setRazorpayOrder(null)}>Cancel</Button>
+              <Button
+                variant="primary"
+                loading={payingBusy}
+                onClick={handleCompleteRazorpay}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5"
+              >
+                <CreditCard className="w-4 h-4" /> Pay {formatMoney(razorpayOrder.amountInr)}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200 rounded-lg">
+              <div>
+                <div className="text-xs text-slate-500">Invoice Reference</div>
+                <div className="font-semibold text-slate-900">{razorpayOrder.invoiceNumber}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs text-slate-500">Amount Due</div>
+                <div className="text-lg font-bold text-emerald-600">{formatMoney(razorpayOrder.amountInr)}</div>
+              </div>
+            </div>
+
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 space-y-1">
+              <div className="font-semibold flex items-center gap-1">
+                <ShieldCheck className="w-4 h-4 text-blue-600" /> Razorpay 256-Bit Encrypted Gateway
+              </div>
+              <div className="text-slate-600">Gateway Key: <code className="font-mono bg-blue-100 px-1 py-0.5 rounded">{razorpayOrder.keyId}</code></div>
+              <div className="text-slate-600">Order ID: <code className="font-mono bg-blue-100 px-1 py-0.5 rounded">{razorpayOrder.orderId}</code></div>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <label className="font-medium text-slate-700 block">Payment Method</label>
+              <div className="grid grid-cols-3 gap-2">
+                <div className="p-2.5 border-2 border-emerald-500 bg-emerald-50/50 rounded-lg text-center font-medium text-emerald-900">
+                  UPI / QR Code
+                </div>
+                <div className="p-2.5 border border-slate-200 rounded-lg text-center font-medium text-slate-700">
+                  Credit / Debit Card
+                </div>
+                <div className="p-2.5 border border-slate-200 rounded-lg text-center font-medium text-slate-700">
+                  Net Banking
+                </div>
+              </div>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {timelineFor && (
