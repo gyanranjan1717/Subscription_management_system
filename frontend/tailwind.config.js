@@ -1,22 +1,22 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
-  ],
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
       colors: {
-        odoo: {
-          50: '#fdf4f5',
-          100: '#fbe8ec',
-          500: '#714B67',
-          600: '#5c3954',
-          700: '#482a41',
-          teal: '#017E84'
+        // One restrained accent for primary actions and active navigation.
+        brand: {
+          50: '#eef3fa',
+          100: '#d9e5f4',
+          600: '#2f5f9e',
+          700: '#244d84',
+          800: '#1c3d6b'
         }
+      },
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif']
       }
-    },
+    }
   },
-  plugins: [],
-}
+  plugins: []
+};

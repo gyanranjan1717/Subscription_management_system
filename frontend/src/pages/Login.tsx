@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
 import { api, DEMO_USERS, setSession } from '../services/api.js';
 import { User } from '../types.js';
-import { Alert } from '../components/ui.js';
-import { Layers } from 'lucide-react';
+import { Alert, Button, Input } from '../components/ui.js';
 
 interface LoginProps {
   onLoggedIn: (user: User) => void;
 }
 
 type Mode = 'signin' | 'signup' | 'forgot';
+
+const TITLES: Record<Mode, string> = { signin: 'Sign in', signup: 'Create a customer account', forgot: 'Reset your password' };
 
 export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
   const [mode, setMode] = useState<Mode>('signin');
@@ -20,6 +21,12 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setError(null);
+    setNotice(null);
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -27,15 +34,13 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
     setNotice(null);
     try {
       if (mode === 'signin') {
-        const res = await api.login(email, password);
-        onLoggedIn(res.user);
+        onLoggedIn((await api.login(email, password)).user);
       } else if (mode === 'signup') {
         const res = await api.register({ email, password, full_name: fullName, company_name: company || undefined });
         setSession(res.token, res.user);
         onLoggedIn(res.user);
       } else {
-        const res = await api.forgotPassword(email);
-        setNotice(res.message);
+        setNotice((await api.forgotPassword(email)).message);
       }
     } catch (err: any) {
       setError(err.message);
@@ -44,80 +49,80 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
     }
   };
 
-  const useDemo = (key: keyof typeof DEMO_USERS) => {
+  const fillDemo = (key: keyof typeof DEMO_USERS) => {
     setMode('signin');
     setEmail(DEMO_USERS[key].email);
     setPassword(DEMO_USERS[key].password);
     setError(null);
+    setNotice(null);
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl p-6 sm:p-8">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-odoo-500 to-odoo-teal flex items-center justify-center">
-            <Layers className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <div className="font-bold text-lg text-slate-900">Brightloop Software</div>
-            <div className="text-xs text-slate-500">Subscription & Billing Platform</div>
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="flex items-center gap-2 mb-5">
+          <span className="h-7 w-7 rounded bg-brand-700 text-white text-sm font-bold flex items-center justify-center" aria-hidden="true">B</span>
+          <div className="leading-tight">
+            <div className="font-semibold text-slate-900">Brightloop</div>
+            <div className="text-xs text-slate-500">Subscription billing</div>
           </div>
         </div>
 
-        <h1 className="text-xl font-bold text-slate-900 mb-4">
-          {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create a customer account' : 'Reset your password'}
-        </h1>
+        <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+          <h1 className="text-lg font-semibold text-slate-900 mb-4">{TITLES[mode]}</h1>
 
-        {error && <div className="mb-3"><Alert kind="error">{error}</Alert></div>}
-        {notice && <div className="mb-3"><Alert kind="success">{notice}</Alert></div>}
+          {error && <div className="mb-3"><Alert kind="error">{error}</Alert></div>}
+          {notice && <div className="mb-3"><Alert kind="success">{notice}</Alert></div>}
 
-        <form onSubmit={submit} className="space-y-3 text-sm">
-          {mode === 'signup' && (
-            <>
-              <input required value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Full name" className="w-full border border-slate-300 rounded-lg p-2.5" />
-              <input value={company} onChange={e => setCompany(e.target.value)} placeholder="Company (optional)" className="w-full border border-slate-300 rounded-lg p-2.5" />
-            </>
-          )}
-          <input required type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" className="w-full border border-slate-300 rounded-lg p-2.5" />
-          {mode !== 'forgot' && (
-            <div>
-              <input
-                required
+          <form onSubmit={submit} className="space-y-3" noValidate={false}>
+            {mode === 'signup' && (
+              <>
+                <Input label="Full name" required value={fullName} onChange={e => setFullName(e.target.value)} autoComplete="name" />
+                <Input label="Company" value={company} onChange={e => setCompany(e.target.value)} autoComplete="organization" />
+              </>
+            )}
+            <Input label="Email" type="email" required autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
+            {mode !== 'forgot' && (
+              <Input
+                label="Password"
                 type="password"
+                required
                 autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                placeholder="Password"
-                className="w-full border border-slate-300 rounded-lg p-2.5"
+                hint={mode === 'signup' ? 'At least 9 characters with an uppercase letter, a lowercase letter and a special character (for example !, # or $).' : undefined}
               />
-              {mode === 'signup' && (
-                <p className="text-[11px] text-slate-500 mt-1">More than 8 characters, with an uppercase letter, a lowercase letter and a special character.</p>
-              )}
-            </div>
-          )}
-          <button type="submit" disabled={busy} className="w-full py-2.5 bg-odoo-500 hover:bg-odoo-600 text-white rounded-lg font-semibold disabled:opacity-50">
-            {busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset link'}
-          </button>
-        </form>
+            )}
+            <Button type="submit" variant="primary" loading={busy} className="w-full">
+              {busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset link'}
+            </Button>
+          </form>
 
-        <div className="flex justify-between text-xs text-odoo-500 mt-4">
-          {mode !== 'signin' ? (
-            <button onClick={() => { setMode('signin'); setError(null); setNotice(null); }} className="hover:underline">Back to sign in</button>
-          ) : (
-            <button onClick={() => { setMode('forgot'); setError(null); }} className="hover:underline">Forgot password?</button>
-          )}
-          {mode !== 'signup' && <button onClick={() => { setMode('signup'); setError(null); setNotice(null); }} className="hover:underline">Create account</button>}
+          <div className="flex justify-between text-sm mt-4">
+            {mode === 'signin' ? (
+              <button onClick={() => switchMode('forgot')} className="text-brand-700 hover:underline">Forgot password?</button>
+            ) : (
+              <button onClick={() => switchMode('signin')} className="text-brand-700 hover:underline">Back to sign in</button>
+            )}
+            {mode !== 'signup' && <button onClick={() => switchMode('signup')} className="text-brand-700 hover:underline">Create account</button>}
+          </div>
         </div>
 
-        <div className="mt-6 pt-4 border-t border-slate-200">
-          <div className="text-[11px] font-semibold uppercase text-slate-400 mb-2">Demo accounts (fills the form)</div>
+        <div className="mt-4 border border-amber-200 bg-amber-50 rounded-lg p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-amber-900 mb-2">Demo accounts</div>
           <div className="grid grid-cols-2 gap-2">
             {(Object.keys(DEMO_USERS) as Array<keyof typeof DEMO_USERS>).map(k => (
-              <button key={k} type="button" onClick={() => useDemo(k)} className="text-left text-xs border border-slate-200 rounded-lg px-2.5 py-2 hover:bg-slate-50">
+              <button
+                key={k}
+                type="button"
+                onClick={() => fillDemo(k)}
+                className="text-left text-xs bg-white border border-amber-200 rounded-md px-2 py-1.5 hover:bg-amber-100"
+              >
                 {DEMO_USERS[k].label}
               </button>
             ))}
           </div>
+          <p className="text-xs text-amber-800 mt-2">Fills the form with seeded demo credentials.</p>
         </div>
       </div>
     </div>

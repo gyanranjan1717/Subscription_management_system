@@ -10,7 +10,7 @@ import { Catalog } from './pages/Catalog.js';
 import { CustomerPortal } from './pages/CustomerPortal.js';
 import { StaffManagement } from './pages/StaffManagement.js';
 import { Login } from './pages/Login.js';
-import { RefreshCw } from 'lucide-react';
+import { Loading, ToastProvider } from './components/ui.js';
 
 export const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(getCurrentUser());
@@ -18,13 +18,12 @@ export const App: React.FC = () => {
   const [targetInvoiceId, setTargetInvoiceId] = useState<number | null>(null);
   const [initializing, setInitializing] = useState(true);
 
-  // A stored session is re-validated against the server; an expired or revoked token sends the user back to sign-in.
+  // A stored session is re-validated against the server; an expired or revoked token returns to sign-in.
   useEffect(() => {
     const check = async () => {
       if (getCurrentUser()) {
         try {
-          const me = await api.me();
-          setCurrentUser(me.user);
+          setCurrentUser((await api.me()).user);
         } catch {
           setSession(null, null);
           setCurrentUser(null);
@@ -35,100 +34,76 @@ export const App: React.FC = () => {
     check();
   }, []);
 
-  const startPage = (user: User) => (user.role === 'customer' ? 'portal' : 'dashboard');
+  const landOn = (user: User) => (user.role === 'customer' ? 'portal' : 'dashboard');
 
   const handleLoggedIn = (user: User) => {
     setCurrentUser(user);
-    setActiveTab(startPage(user));
+    setActiveTab(landOn(user));
+    setTargetInvoiceId(null);
   };
 
   const handleLogout = () => {
     setSession(null, null);
     setCurrentUser(null);
+    setTargetInvoiceId(null);
   };
 
   const handleSwitchPersona = async (key: keyof typeof DEMO_USERS) => {
     const creds = DEMO_USERS[key];
     try {
-      const res = await api.login(creds.email, creds.password);
-      setCurrentUser(res.user);
-      // If switched to a customer, take them directly to customer portal to demonstrate data isolation
-      setActiveTab(startPage(res.user));
-    } catch (err: any) {
+      handleLoggedIn((await api.login(creds.email, creds.password)).user);
+    } catch (err) {
       console.error('Persona switch failed', err);
     }
   };
 
-  const handleNavigateToInvoice = (invoiceId: number) => {
+  const openInvoice = (invoiceId: number) => {
     setTargetInvoiceId(invoiceId);
     setActiveTab('invoices');
   };
 
-  const handleRefresh = () => {
-    window.location.reload();
-  };
-
   if (initializing) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">
-        <div className="flex flex-col items-center gap-3">
-          <RefreshCw className="w-8 h-8 animate-spin text-odoo-500" />
-          <span className="font-semibold text-sm">Initializing Brightloop Platform...</span>
-        </div>
-      </div>
-    );
+    return <Loading label="Starting…" />;
   }
 
   if (!currentUser) {
-    return <Login onLoggedIn={handleLoggedIn} />;
+    return (
+      <ToastProvider>
+        <Login onLoggedIn={handleLoggedIn} />
+      </ToastProvider>
+    );
   }
 
+  const role = currentUser.role;
+  const isStaff = role === 'admin' || role === 'staff';
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Navbar
-        currentUser={currentUser}
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        onSwitchPersona={handleSwitchPersona}
-        onRefresh={handleRefresh}
-        onLogout={handleLogout}
-      />
+    <ToastProvider>
+      <div className="min-h-screen bg-slate-50 flex flex-col">
+        <Navbar
+          currentUser={currentUser}
+          activeTab={activeTab}
+          setActiveTab={tab => { setActiveTab(tab); if (tab !== 'invoices') setTargetInvoiceId(null); }}
+          onSwitchPersona={handleSwitchPersona}
+          onRefresh={() => window.location.reload()}
+          onLogout={handleLogout}
+        />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        {activeTab === 'dashboard' && currentUser?.role !== 'customer' && (
-          <Dashboard
-            onNavigateToInvoice={handleNavigateToInvoice}
-            onNavigateToBilling={() => setActiveTab('billing')}
-          />
-        )}
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          {activeTab === 'dashboard' && isStaff && <Dashboard onNavigateToInvoice={openInvoice} onNavigateToBilling={() => setActiveTab('billing')} />}
+          {activeTab === 'catalog' && isStaff && <Catalog currentUser={currentUser} />}
+          {activeTab === 'subscriptions' && isStaff && <Subscriptions />}
+          {activeTab === 'billing' && isStaff && <BillingRun onOpenInvoices={() => setActiveTab('invoices')} />}
+          {activeTab === 'invoices' && <Invoices key={currentUser.id} initialInvoiceId={targetInvoiceId} />}
+          {activeTab === 'portal' && role === 'customer' && <CustomerPortal currentUser={currentUser} onViewInvoice={openInvoice} />}
+          {activeTab === 'staff' && role === 'admin' && <StaffManagement />}
+        </main>
 
-        {activeTab === 'subscriptions' && currentUser?.role !== 'customer' && <Subscriptions />}
-
-        {activeTab === 'billing' && currentUser?.role !== 'customer' && <BillingRun />}
-
-        {activeTab === 'invoices' && <Invoices key={currentUser?.id} initialInvoiceId={targetInvoiceId} />}
-
-        {activeTab === 'catalog' && currentUser?.role !== 'customer' && (
-          <Catalog
-            currentUser={currentUser}
-            onSelectTemplate={() => setActiveTab('subscriptions')}
-          />
-        )}
-
-        {activeTab === 'portal' && (
-          <CustomerPortal
-            currentUser={currentUser}
-            onViewInvoice={handleNavigateToInvoice}
-          />
-        )}
-
-        {activeTab === 'staff' && currentUser?.role === 'admin' && <StaffManagement />}
-      </main>
-
-      <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500">
-        Brightloop Software Subscription & Recurring Billing System &bull; Built for Odoo x Make-A-Ton 9.0 Kochi Hackathon
-      </footer>
-    </div>
+        <footer className="border-t border-slate-200 bg-white py-3 text-center text-xs text-slate-500">
+          Brightloop subscription billing · Odoo × Make-A-Ton 9.0
+        </footer>
+      </div>
+    </ToastProvider>
   );
 };
 

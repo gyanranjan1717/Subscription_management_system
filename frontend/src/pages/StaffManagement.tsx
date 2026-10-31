@@ -1,24 +1,27 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api.js';
-import { UserCheck, Plus, ShieldAlert, CheckCircle2, User, Mail, Phone, Lock } from 'lucide-react';
+import { Alert, Button, Card, EmptyState, ErrorState, Input, Loading, PageHeader, table, useToast } from '../components/ui.js';
+import { formatDate } from '../lib/format.js';
 
 export const StaffManagement: React.FC = () => {
+  const toast = useToast();
   const [staffList, setStaffList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
-  const [password, setPassword] = useState('Brightloop#2026');
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [password, setPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const loadStaff = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
-      const res = await api.getStaff();
-      setStaffList(res.staff);
+      setStaffList((await api.getStaff()).staff);
     } catch (err: any) {
-      setError(err.message);
+      setLoadError('Unable to load staff. ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -28,152 +31,64 @@ export const StaffManagement: React.FC = () => {
     loadStaff();
   }, []);
 
-  const handleCreateStaff = async (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
+    setSaving(true);
+    setFormError(null);
     try {
-      const res = await api.createStaff({
-        email,
-        full_name: fullName,
-        phone,
-        password
-      });
-      setFeedback(`Staff member ${res.staff.full_name} (${res.staff.email}) created successfully!`);
+      const res = await api.createStaff({ email, full_name: fullName, phone: phone || undefined, password });
+      toast('success', `Staff account created for ${res.staff.full_name} (${res.staff.email}).`);
       setEmail('');
       setFullName('');
       setPhone('');
-      loadStaff();
+      setPassword('');
+      await loadStaff();
     } catch (err: any) {
-      setError(err.message);
+      setFormError(err.message);
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Internal Staff & Team Provisioning</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Requirement: <strong>Only the admin can add a new member of staff.</strong> Internal staff handle day-to-day operations with limited administrative rights.
-          </p>
-        </div>
-      </div>
+    <div>
+      <PageHeader title="Staff" subtitle="Only an admin can add staff. Staff run billing and record payments but cannot change the catalog, discounts or staff." />
 
-      {feedback && (
-        <div className="bg-emerald-50 border border-emerald-300 text-emerald-950 px-4 py-3 rounded-lg text-sm flex items-center justify-between shadow-sm">
-          <span className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600" /> {feedback}
-          </span>
-          <button onClick={() => setFeedback(null)} className="text-emerald-800 font-bold">×</button>
-        </div>
-      )}
-
-      {error && (
-        <div className="bg-red-50 border border-red-300 text-red-950 px-4 py-3 rounded-lg text-sm flex items-center justify-between shadow-sm">
-          <span className="flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 text-red-600" /> {error}
-          </span>
-          <button onClick={() => setError(null)} className="text-red-800 font-bold">×</button>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Form: Add Staff Member */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4">
-          <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
-            <Plus className="w-4 h-4 text-odoo-500" /> Provision Internal Staff
-          </h3>
-          <form onSubmit={handleCreateStaff} className="space-y-3 text-xs">
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Full Name</label>
-              <input
-                type="text"
-                required
-                value={fullName}
-                onChange={e => setFullName(e.target.value)}
-                placeholder="e.g. Jason Myers"
-                className="w-full border border-slate-300 rounded p-2 text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Company Email</label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="e.g. jason@brightloop.com"
-                className="w-full border border-slate-300 rounded p-2 text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Phone</label>
-              <input
-                type="text"
-                value={phone}
-                onChange={e => setPhone(e.target.value)}
-                placeholder="e.g. +1-555-0199"
-                className="w-full border border-slate-300 rounded p-2 text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                Password (&gt;8 chars, Upper, Lower, Special)
-              </label>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                className="w-full border border-slate-300 rounded p-2 text-sm"
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-2 bg-odoo-500 hover:bg-odoo-600 text-white rounded font-bold text-xs shadow-sm mt-2 transition-colors"
-            >
-              Add Staff Member
-            </button>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <Card title="Add a staff member">
+          {formError && <div className="mb-3"><Alert kind="error">{formError}</Alert></div>}
+          <form onSubmit={submit} className="space-y-3">
+            <Input label="Full name" required value={fullName} onChange={e => setFullName(e.target.value)} />
+            <Input label="Work email" type="email" required value={email} onChange={e => setEmail(e.target.value)} autoComplete="off" />
+            <Input label="Phone" value={phone} onChange={e => setPhone(e.target.value)} />
+            <Input label="Initial password" type="password" required value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" hint="At least 9 characters with an uppercase letter, a lowercase letter and a special character." />
+            <Button type="submit" variant="primary" loading={saving} className="w-full">Add staff member</Button>
           </form>
-        </div>
+        </Card>
 
-        {/* Existing Staff Roster */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4">
-          <h3 className="font-bold text-slate-900 text-base">Current Internal Staff Roster</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 text-xs font-semibold text-slate-600 border-b border-slate-200">
-                <tr>
-                  <th className="px-4 py-3">Member</th>
-                  <th className="px-4 py-3">Email</th>
-                  <th className="px-4 py-3">Role</th>
-                  <th className="px-4 py-3">Date Joined</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-xs">
-                {staffList.map(st => (
-                  <tr key={st.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 font-semibold text-slate-900">{st.full_name}</td>
-                    <td className="px-4 py-3 text-slate-600">{st.email}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded font-bold uppercase text-[11px] ${
-                        st.role === 'admin' ? 'bg-purple-100 text-odoo-500' : 'bg-blue-100 text-blue-800'
-                      }`}>
-                        {st.role}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-400">{st.created_at}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <Card className="lg:col-span-2" title="Admins and staff" flush>
+          {loading ? <Loading label="Loading staff…" /> : loadError ? <ErrorState message={loadError} onRetry={loadStaff} /> : staffList.length === 0 ? (
+            <EmptyState title="No staff yet" />
+          ) : (
+            <div className={table.wrap}>
+              <table className={table.table}>
+                <thead className={table.head}>
+                  <tr><th className={table.th}>Name</th><th className={table.th}>Email</th><th className={table.th}>Role</th><th className={table.th}>Added</th></tr>
+                </thead>
+                <tbody className={table.body}>
+                  {staffList.map(st => (
+                    <tr key={st.id} className={table.row}>
+                      <td className={table.td + ' font-medium'}>{st.full_name}</td>
+                      <td className={table.td + ' text-slate-600'}>{st.email}</td>
+                      <td className={table.td + ' capitalize'}>{st.role}</td>
+                      <td className={table.td + ' whitespace-nowrap text-slate-600'}>{formatDate(st.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
       </div>
     </div>
   );

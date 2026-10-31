@@ -3,7 +3,23 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    @apply text-[15px];
+  }
   body {
     @apply antialiased text-slate-900 bg-slate-50;
+  }
+  /* Visible keyboard focus everywhere, without changing mouse behaviour. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-brand-600;
+  }
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media print {
+  header, nav, footer, .no-print {
+    display: none !important;
   }
 }

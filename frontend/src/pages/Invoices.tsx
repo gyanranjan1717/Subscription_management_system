@@ -2,42 +2,49 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api, getCurrentUser } from '../services/api.js';
 import { Invoice } from '../types.js';
 import Pager, { PageInfo } from '../components/Pager.js';
-import { Alert, EmptyState, Loading, StatusBadge } from '../components/ui.js';
-import { formatMoney } from '../lib/format.js';
-import { AlertTriangle, Eye, Printer, Send, DollarSign, Download } from 'lucide-react';
+import {
+  Alert, Button, Card, ConfirmDialog, EmptyState, ErrorState, Input, Loading, Modal, PageHeader, Select, StatusBadge, table, useToast, cx
+} from '../components/ui.js';
+import { formatDate, formatMoney } from '../lib/format.js';
+import { Download, Printer, Send } from 'lucide-react';
 
 interface InvoicesProps {
   initialInvoiceId?: number | null;
 }
 
 const METHODS = ['Bank Transfer', 'Credit Card', 'UPI', 'Cash', 'Cheque'] as const;
+const FILTERS = ['All', 'Draft', 'Confirmed', 'Paid', 'Cancelled'] as const;
+
+const balanceOf = (inv: Invoice) => inv.balance_due ?? Number((inv.total_amount - inv.amount_paid).toFixed(2));
+const isPartial = (inv: Invoice) => inv.amount_paid > 0 && balanceOf(inv) > 0;
 
 export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
+  const toast = useToast();
   const user = getCurrentUser();
   const isStaff = user?.role === 'admin' || user?.role === 'staff';
 
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState('All');
+  const [statusFilter, setStatusFilter] = useState<(typeof FILTERS)[number]>('All');
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageInfo, setPageInfo] = useState<PageInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<Invoice | null>(null);
   const [payTarget, setPayTarget] = useState<Invoice | null>(null);
   const [payAmount, setPayAmount] = useState('');
   const [payMethod, setPayMethod] = useState<(typeof METHODS)[number]>('Bank Transfer');
+  const [payDate, setPayDate] = useState('');
   const [payRef, setPayRef] = useState('');
   const [payNote, setPayNote] = useState('');
   const [payError, setPayError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<Invoice | null>(null);
 
-  // Debounce the server-side search (invoice-number prefix).
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(t);
@@ -51,7 +58,7 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
       setInvoices(res.invoices);
       setPageInfo(res.pagination);
     } catch (err: any) {
-      setError('Could not load invoices: ' + err.message);
+      setError('Unable to load invoices. ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -75,29 +82,40 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
     if (initialInvoiceId) viewInvoice(initialInvoiceId);
   }, [initialInvoiceId]);
 
-  const flash = (msg: string) => {
-    setFeedback(msg);
-    setTimeout(() => setFeedback(null), 6000);
-  };
-
   const viewInvoice = async (id: number) => {
     try {
       setDetail((await api.getInvoice(id)).invoice);
     } catch (err: any) {
-      setError('Could not open the invoice: ' + err.message);
+      toast('error', 'Unable to open the invoice. ' + err.message);
     }
   };
 
-  const changeStatus = async (inv: Invoice, status: 'Confirmed' | 'Cancelled') => {
-    if (status === 'Cancelled' && !window.confirm(`Cancel invoice ${inv.invoice_number}? A cancelled period is never billed again.`)) return;
+  const confirmInvoice = async (inv: Invoice) => {
     setBusyId(inv.id);
-    setError(null);
     try {
-      await api.updateInvoiceStatus(inv.id, status);
-      flash(`Invoice ${inv.invoice_number} is now ${status}.`);
+      await api.updateInvoiceStatus(inv.id, 'Confirmed');
+      toast('success', `${inv.invoice_number} confirmed.`);
+      await loadInvoices();
+      if (detail?.id === inv.id) await viewInvoice(inv.id);
+    } catch (err: any) {
+      toast('error', err.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const cancelInvoice = async () => {
+    if (!cancelTarget) return;
+    setBusyId(cancelTarget.id);
+    try {
+      await api.updateInvoiceStatus(cancelTarget.id, 'Cancelled');
+      toast('success', `${cancelTarget.invoice_number} cancelled.`);
+      setCancelTarget(null);
+      setDetail(null);
       await loadInvoices();
     } catch (err: any) {
-      setError(err.message);
+      setCancelTarget(null);
+      toast('error', err.message);
     } finally {
       setBusyId(null);
     }
@@ -106,9 +124,9 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
   const sendInvoice = async (inv: Invoice) => {
     setBusyId(inv.id);
     try {
-      flash((await api.sendInvoice(inv.id)).message);
+      toast('success', (await api.sendInvoice(inv.id)).message);
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     } finally {
       setBusyId(null);
     }
@@ -116,7 +134,8 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
 
   const openPay = (inv: Invoice) => {
     setPayTarget(inv);
-    setPayAmount(String(inv.balance_due ?? Number((inv.total_amount - inv.amount_paid).toFixed(2))));
+    setPayAmount(String(balanceOf(inv)));
+    setPayDate(new Date().toISOString().slice(0, 10));
     setPayRef('');
     setPayNote('');
     setPayError(null);
@@ -132,13 +151,12 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
         invoice_id: payTarget.id,
         amount: payAmount.trim(),
         payment_method: payMethod,
+        payment_date: payDate || undefined,
         reference: payRef || undefined,
         note: payNote || undefined
       });
       const p = res.payment;
-      flash(
-        `Recorded on ${p.invoiceNumber}. Paid ${formatMoney(p.amountPaid)} of ${formatMoney(p.totalAmount)}, outstanding ${formatMoney(p.balanceRemaining)}. Status: ${p.status.toUpperCase()}.`
-      );
+      toast('success', `Paid ${formatMoney(p.amountPaid)} of ${formatMoney(p.totalAmount)}. Outstanding ${formatMoney(p.balanceRemaining)}. Status: ${String(p.status).toUpperCase()}.`);
       setPayTarget(null);
       setDetail(null);
       await loadInvoices();
@@ -149,145 +167,103 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
     }
   };
 
-  const balanceOf = (inv: Invoice) => inv.balance_due ?? Number((inv.total_amount - inv.amount_paid).toFixed(2));
   const downloadCsv = async () => {
     try {
       await api.downloadCsv('invoices');
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     }
   };
 
+  const hasFilters = statusFilter !== 'All' || overdueOnly || !!search;
+  const canPay = (inv: Invoice) => isStaff && inv.status === 'Confirmed' && balanceOf(inv) > 0;
+
   return (
-    <div className="space-y-5">
-      <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{isStaff ? 'Invoices & Payments' : 'My Invoices'}</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            {isStaff
-              ? 'Confirm invoices, record partial or full payments and chase overdue balances.'
-              : `Invoices for ${user?.email}. You can only see your own.`}
-          </p>
-        </div>
-        {isStaff && (
-          <div className="flex flex-wrap items-center gap-2">
-            <button onClick={downloadCsv} className="px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1.5">
-              <Download className="w-3.5 h-3.5" /> Export CSV
-            </button>
-            <button
-              onClick={() => { setOverdueOnly(!overdueOnly); setStatusFilter('All'); }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 ${
-                overdueOnly ? 'bg-red-100 text-red-900 border-red-300' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
-              }`}
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-red-600" /> Overdue only
-            </button>
-          </div>
-        )}
-      </div>
+    <div>
+      <PageHeader
+        title={isStaff ? 'Invoices' : 'My invoices'}
+        subtitle={isStaff ? 'Confirm invoices, record payments and chase overdue balances' : `Invoices for ${user?.email}`}
+        actions={isStaff && <Button onClick={downloadCsv}><Download className="w-3.5 h-3.5" aria-hidden="true" /> Export CSV</Button>}
+      />
 
-      {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
-      {feedback && <Alert kind="success" onClose={() => setFeedback(null)}>{feedback}</Alert>}
+      {error && <div className="mb-4"><Alert kind="error" onClose={() => setError(null)}>{error}</Alert></div>}
 
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          {['All', 'Draft', 'Confirmed', 'Paid', 'Cancelled'].map(st => (
-            <button
-              key={st}
-              onClick={() => { setStatusFilter(st); setOverdueOnly(false); }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap ${
-                statusFilter === st && !overdueOnly ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
-              }`}
-            >
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter by status">
+          {FILTERS.map(st => (
+            <Button key={st} size="sm" variant={statusFilter === st && !overdueOnly ? 'primary' : 'secondary'} aria-pressed={statusFilter === st && !overdueOnly} onClick={() => { setStatusFilter(st); setOverdueOnly(false); }}>
               {st}
-            </button>
+            </Button>
           ))}
+          {isStaff && (
+            <Button size="sm" variant={overdueOnly ? 'danger' : 'secondary'} aria-pressed={overdueOnly} onClick={() => { setOverdueOnly(!overdueOnly); setStatusFilter('All'); }}>
+              Overdue
+            </Button>
+          )}
         </div>
-        <input
-          type="search"
-          placeholder="Invoice number starts with…"
-          value={searchInput}
-          onChange={e => setSearchInput(e.target.value)}
-          className="w-full sm:w-64 px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-odoo-500"
-        />
+        <div className="w-full lg:w-72">
+          <Input label="Search" type="search" value={searchInput} onChange={e => setSearchInput(e.target.value)} placeholder="Invoice number, e.g. INV-2026-0001" hint={undefined} />
+        </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <Card flush>
         {loading ? (
           <Loading label="Loading invoices…" />
+        ) : error && invoices.length === 0 ? (
+          <ErrorState message="Unable to load invoices." onRetry={loadInvoices} />
         ) : invoices.length === 0 ? (
           <EmptyState
-            title="No invoices match"
-            hint={isStaff ? 'Run billing from the Billing Run page to create invoices.' : 'Invoices appear here after your subscription is billed.'}
+            title={hasFilters ? 'No invoices match these filters' : 'No invoices yet'}
+            hint={hasFilters ? 'Clear the filters to see every invoice.' : isStaff ? 'Run billing to create the first invoices.' : 'Invoices appear here once your subscription has been billed.'}
           />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 text-xs font-semibold text-slate-600 border-b border-slate-200">
+          <div className={table.wrap}>
+            <table className={table.table}>
+              <thead className={table.head}>
                 <tr>
-                  <th className="px-4 py-3">Invoice</th>
-                  {isStaff && <th className="px-4 py-3 hidden md:table-cell">Customer</th>}
-                  <th className="px-4 py-3 hidden lg:table-cell">Period</th>
-                  <th className="px-4 py-3 hidden sm:table-cell">Due</th>
-                  <th className="px-4 py-3 text-right">Total</th>
-                  <th className="px-4 py-3 text-right">Paid</th>
-                  <th className="px-4 py-3 text-right">Outstanding</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 text-right">Actions</th>
+                  <th className={table.th}>Invoice</th>
+                  {isStaff && <th className={table.th}>Customer</th>}
+                  <th className={table.th}>Billing period</th>
+                  <th className={table.th}>Due</th>
+                  <th className={table.thNum}>Total</th>
+                  <th className={table.thNum}>Paid</th>
+                  <th className={table.thNum}>Outstanding</th>
+                  <th className={table.th}>Status</th>
+                  <th className={table.thNum}><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className={table.body}>
                 {invoices.map(inv => {
                   const balance = balanceOf(inv);
                   const busy = busyId === inv.id;
                   return (
-                    <tr key={inv.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-3">
-                        <button onClick={() => viewInvoice(inv.id)} className="font-semibold text-odoo-500 hover:underline flex items-center gap-1.5 whitespace-nowrap">
-                          <Eye className="w-3.5 h-3.5 text-slate-400" /> {inv.invoice_number}
-                        </button>
-                        <div className="text-[11px] text-slate-400">{inv.subscription_number}</div>
+                    <tr key={inv.id} className={table.row}>
+                      <td className={table.td}>
+                        <button onClick={() => viewInvoice(inv.id)} className="font-medium text-brand-700 hover:underline whitespace-nowrap">{inv.invoice_number}</button>
+                        <div className="text-xs text-slate-500 whitespace-nowrap">{inv.subscription_number}</div>
                       </td>
                       {isStaff && (
-                        <td className="px-4 py-3 hidden md:table-cell">
-                          <div className="font-medium text-slate-900">{inv.customer_name}</div>
-                          <div className="text-xs text-slate-400">{inv.company_name}</div>
+                        <td className={table.td}>
+                          <div className="text-slate-900">{inv.customer_name}</div>
+                          <div className="text-xs text-slate-500">{inv.company_name}</div>
                         </td>
                       )}
-                      <td className="px-4 py-3 text-xs font-mono text-slate-600 hidden lg:table-cell">{inv.period_start} → {inv.period_end}</td>
-                      <td className={`px-4 py-3 text-xs hidden sm:table-cell ${inv.is_overdue ? 'text-red-600 font-bold' : 'text-slate-600'}`}>{inv.due_date}</td>
-                      <td className="px-4 py-3 text-right font-bold">{formatMoney(inv.total_amount)}</td>
-                      <td className="px-4 py-3 text-right text-emerald-700 font-medium">{formatMoney(inv.amount_paid)}</td>
-                      <td className={`px-4 py-3 text-right font-semibold ${balance > 0 && inv.status !== 'Cancelled' ? 'text-amber-700' : 'text-slate-400'}`}>
+                      <td className={table.td + ' whitespace-nowrap text-slate-600'}>{formatDate(inv.period_start)} to {formatDate(inv.period_end)}</td>
+                      <td className={table.td + ' whitespace-nowrap ' + (inv.is_overdue ? 'text-red-700 font-medium' : 'text-slate-600')}>{formatDate(inv.due_date)}</td>
+                      <td className={table.tdNum + ' font-medium'}>{formatMoney(inv.total_amount)}</td>
+                      <td className={table.tdNum}>{formatMoney(inv.amount_paid)}</td>
+                      <td className={table.tdNum + (balance > 0 && inv.status !== 'Cancelled' ? ' text-amber-800 font-medium' : ' text-slate-400')}>
                         {inv.status === 'Cancelled' ? '—' : formatMoney(balance)}
                       </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge status={inv.status} overdue={!!inv.is_overdue} partial={inv.amount_paid > 0 && balance > 0} />
+                      <td className={table.td}>
+                        <StatusBadge status={inv.status} overdue={!!inv.is_overdue} partial={isPartial(inv)} />
                       </td>
-                      <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
-                        {isStaff && inv.status === 'Draft' && (
-                          <button disabled={busy} onClick={() => changeStatus(inv, 'Confirmed')} className="px-2 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-semibold disabled:opacity-50">
-                            Confirm
-                          </button>
-                        )}
-                        {isStaff && inv.status === 'Confirmed' && balance > 0 && (
-                          <button disabled={busy} onClick={() => openPay(inv)} className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50">
-                            <DollarSign className="w-3 h-3" /> Pay
-                          </button>
-                        )}
-                        {isStaff && ['Draft', 'Confirmed'].includes(inv.status) && inv.amount_paid === 0 && (
-                          <button disabled={busy} onClick={() => changeStatus(inv, 'Cancelled')} className="px-2 py-1 bg-red-50 text-red-700 hover:bg-red-100 rounded text-xs font-semibold disabled:opacity-50">
-                            Cancel
-                          </button>
-                        )}
-                        <button onClick={() => viewInvoice(inv.id)} className="px-2 py-1 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded text-xs font-semibold inline-flex items-center gap-1">
-                          <Printer className="w-3 h-3" /> View
-                        </button>
-                        {isStaff && (
-                          <button disabled={busy} onClick={() => sendInvoice(inv)} className="px-2 py-1 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50">
-                            <Send className="w-3 h-3" /> Send
-                          </button>
-                        )}
+                      <td className={table.tdNum}>
+                        <div className="flex justify-end gap-1.5">
+                          {isStaff && inv.status === 'Draft' && <Button size="sm" loading={busy} onClick={() => confirmInvoice(inv)}>Confirm</Button>}
+                          {canPay(inv) && <Button size="sm" variant="primary" disabled={busy} onClick={() => openPay(inv)}>Record payment</Button>}
+                          <Button size="sm" onClick={() => viewInvoice(inv.id)}>View</Button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -297,177 +273,182 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
           </div>
         )}
         <Pager info={pageInfo} onPage={setPage} />
-      </div>
+      </Card>
 
       {/* Invoice document */}
       {detail && (
-        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-start sm:items-center justify-center p-2 sm:p-4 overflow-y-auto print:static print:bg-white print:p-0">
-          <div className="bg-white rounded-xl shadow-2xl max-w-3xl w-full p-4 sm:p-8 border border-slate-200 my-4">
-            <div className="flex justify-between items-start border-b border-slate-200 pb-4 gap-3">
-              <div>
-                <div className="text-xl font-black text-slate-900 uppercase tracking-tight">Brightloop Software</div>
-                <div className="text-xs text-slate-500">billing@brightloop.com</div>
-              </div>
-              <div className="flex items-center gap-2 print:hidden">
-                {isStaff && detail.status === 'Confirmed' && balanceOf(detail) > 0 && (
-                  <button onClick={() => openPay(detail)} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-semibold">
-                    Record payment
-                  </button>
-                )}
-                <button onClick={() => window.print()} className="px-3 py-1.5 bg-odoo-500 hover:bg-odoo-600 text-white rounded text-xs font-semibold flex items-center gap-1">
-                  <Printer className="w-3.5 h-3.5" /> Print / PDF
-                </button>
-                <button onClick={() => setDetail(null)} aria-label="Close" className="text-slate-400 hover:text-slate-700 font-bold text-lg px-1">✕</button>
-              </div>
+        <Modal
+          title={`Invoice ${detail.invoice_number}`}
+          size="xl"
+          onClose={() => setDetail(null)}
+          footer={
+            <>
+              <Button onClick={() => window.print()}><Printer className="w-3.5 h-3.5" aria-hidden="true" /> Print / PDF</Button>
+              {isStaff && <Button loading={busyId === detail.id} onClick={() => sendInvoice(detail)}><Send className="w-3.5 h-3.5" aria-hidden="true" /> Send to customer</Button>}
+              {isStaff && ['Draft', 'Confirmed'].includes(detail.status) && detail.amount_paid === 0 && <Button variant="danger" onClick={() => setCancelTarget(detail)}>Cancel invoice</Button>}
+              {isStaff && detail.status === 'Draft' && <Button variant="primary" loading={busyId === detail.id} onClick={() => confirmInvoice(detail)}>Confirm invoice</Button>}
+              {canPay(detail) && <Button variant="primary" onClick={() => openPay(detail)}>Record payment</Button>}
+            </>
+          }
+        >
+          <div className="flex flex-col sm:flex-row sm:justify-between gap-4 pb-4 border-b border-slate-200">
+            <div className="text-sm">
+              <div className="text-xs font-medium text-slate-500 mb-1">Billed to</div>
+              <div className="font-semibold text-slate-900">{detail.customer_name}</div>
+              {detail.company_name && <div className="text-slate-700">{detail.company_name}</div>}
+              <div className="text-slate-500">{detail.customer_email}</div>
             </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 my-5 text-xs">
-              <div>
-                <span className="text-slate-400 uppercase font-bold text-[10px] block">Billed to</span>
-                <div className="font-bold text-slate-900 text-sm mt-0.5">{detail.customer_name}</div>
-                <div className="text-slate-600">{detail.company_name}</div>
-                <div className="text-slate-500">{detail.customer_email}</div>
-              </div>
-              <div className="sm:text-right space-y-0.5">
-                <div className="text-lg font-black text-odoo-500">{detail.invoice_number}</div>
-                <div><StatusBadge status={detail.status} overdue={!!detail.is_overdue} partial={detail.amount_paid > 0 && balanceOf(detail) > 0} /></div>
-                <div className="text-slate-600">Subscription: <strong>{detail.subscription_number}</strong></div>
-                <div className="text-slate-600">Billing period: <strong>{detail.period_start} → {detail.period_end}</strong></div>
-                <div className="text-slate-600">Issued: <strong>{detail.issue_date}</strong> · Due: <strong>{detail.due_date}</strong></div>
-              </div>
-            </div>
-
-            <div className="border border-slate-200 rounded-lg overflow-x-auto text-xs">
-              <table className="w-full text-left min-w-[560px]">
-                <thead className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
-                  <tr>
-                    <th className="p-2.5">Item</th>
-                    <th className="p-2.5 text-center">Qty</th>
-                    <th className="p-2.5 text-right">Unit price</th>
-                    <th className="p-2.5 text-right">Discount</th>
-                    <th className="p-2.5 text-right">Tax</th>
-                    <th className="p-2.5 text-right">Line total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {detail.lines?.map(l => (
-                    <tr key={l.id}>
-                      <td className="p-2.5 font-medium text-slate-800">{l.description}</td>
-                      <td className="p-2.5 text-center">{l.quantity}</td>
-                      <td className="p-2.5 text-right font-mono">{formatMoney(l.unit_price)}</td>
-                      <td className="p-2.5 text-right font-mono">{l.discount_amount ? `-${formatMoney(l.discount_amount)}` : '—'}</td>
-                      <td className="p-2.5 text-right font-mono">
-                        {formatMoney(l.tax_amount)}
-                        {l.tax_rate !== undefined && <div className="text-[10px] text-slate-400">{l.tax_rate}%</div>}
-                      </td>
-                      <td className="p-2.5 text-right font-mono font-semibold">{formatMoney(l.line_total)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="flex justify-end my-4 text-xs">
-              <div className="w-full sm:w-72 space-y-1.5">
-                <Row label="Subtotal" value={formatMoney(detail.subtotal)} />
-                {detail.discount_amount > 0 && (
-                  <Row
-                    label={`Discount${detail.discounts?.length ? ` (${detail.discounts.map(d => d.code).join(', ')})` : ''}`}
-                    value={`-${formatMoney(detail.discount_amount)}`}
-                    className="text-purple-700 font-semibold"
-                  />
-                )}
-                <Row label="Tax" value={formatMoney(detail.tax_amount)} />
-                <Row label="Total" value={formatMoney(detail.total_amount)} className="text-base font-black text-slate-900 border-t border-slate-200 pt-2" />
-                <Row label="Paid" value={formatMoney(detail.amount_paid)} className="font-bold text-emerald-700" />
-                <Row label="Outstanding" value={formatMoney(balanceOf(detail))} className={`font-bold ${balanceOf(detail) > 0 ? 'text-amber-700' : 'text-emerald-700'}`} />
-              </div>
-            </div>
-
-            {detail.payments && detail.payments.length > 0 && (
-              <div className="border-t border-slate-200 pt-4">
-                <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-2">Payments received</h4>
-                <div className="space-y-1 text-xs">
-                  {detail.payments.map(p => (
-                    <div key={p.id} className="p-2 bg-emerald-50 text-emerald-950 rounded flex justify-between items-center gap-2">
-                      <div>
-                        <span className="font-bold">{p.payment_method}</span> · {p.payment_date}
-                        {p.reference && <span className="text-slate-600"> · {p.reference}</span>}
-                        {p.note && <span className="text-emerald-800"> — {p.note}</span>}
-                      </div>
-                      <span className="font-mono font-bold">{formatMoney(p.amount)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <dl className="text-sm grid grid-cols-[auto_auto] gap-x-4 gap-y-1 sm:text-right">
+              <dt className="text-slate-500">Status</dt>
+              <dd><StatusBadge status={detail.status} overdue={!!detail.is_overdue} partial={isPartial(detail)} /></dd>
+              <dt className="text-slate-500">Subscription</dt>
+              <dd className="font-medium">{detail.subscription_number}</dd>
+              <dt className="text-slate-500">Billing period</dt>
+              <dd>{formatDate(detail.period_start)} to {formatDate(detail.period_end)}</dd>
+              <dt className="text-slate-500">Issued</dt>
+              <dd>{formatDate(detail.issue_date)}</dd>
+              <dt className="text-slate-500">Due</dt>
+              <dd className={detail.is_overdue ? 'text-red-700 font-medium' : ''}>{formatDate(detail.due_date)}</dd>
+            </dl>
           </div>
-        </div>
+
+          <div className={table.wrap + ' mt-4 border border-slate-200 rounded-md'}>
+            <table className={table.table + ' min-w-[640px]'}>
+              <thead className={table.head}>
+                <tr>
+                  <th className={table.th}>Item</th>
+                  <th className={table.thNum}>Qty</th>
+                  <th className={table.thNum}>Unit price</th>
+                  <th className={table.thNum}>Discount</th>
+                  <th className={table.thNum}>Tax</th>
+                  <th className={table.thNum}>Line total</th>
+                </tr>
+              </thead>
+              <tbody className={table.body}>
+                {detail.lines?.map(l => (
+                  <tr key={l.id}>
+                    <td className={table.td}>{l.description}</td>
+                    <td className={table.tdNum}>{l.quantity}</td>
+                    <td className={table.tdNum}>{formatMoney(l.unit_price)}</td>
+                    <td className={table.tdNum}>{l.discount_amount ? `−${formatMoney(l.discount_amount)}` : '—'}</td>
+                    <td className={table.tdNum}>
+                      {formatMoney(l.tax_amount)}
+                      {l.tax_rate !== undefined && <div className="text-xs text-slate-500">{l.tax_rate}%</div>}
+                    </td>
+                    <td className={table.tdNum + ' font-medium'}>{formatMoney(l.line_total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex justify-end mt-4">
+            <dl className="w-full sm:w-80 text-sm space-y-1">
+              <Line label="Subtotal" value={formatMoney(detail.subtotal)} />
+              {detail.discount_amount > 0 && (
+                <Line label={`Discount${detail.discounts?.length ? ` (${detail.discounts.map(d => d.code).join(', ')})` : ''}`} value={`−${formatMoney(detail.discount_amount)}`} />
+              )}
+              <Line label="Tax" value={`+${formatMoney(detail.tax_amount)}`} />
+              <Line label="Total" value={formatMoney(detail.total_amount)} strong className="border-t border-slate-300 pt-1.5 mt-1.5 text-base" />
+              <Line label="Paid" value={`−${formatMoney(detail.amount_paid)}`} />
+              <Line
+                label="Outstanding"
+                value={formatMoney(balanceOf(detail))}
+                strong
+                className={cx('border-t border-slate-300 pt-1.5 mt-1.5', balanceOf(detail) > 0 && detail.status !== 'Cancelled' ? 'text-amber-800' : 'text-emerald-700')}
+              />
+            </dl>
+          </div>
+
+          {detail.payments && detail.payments.length > 0 && (
+            <div className="mt-5">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">Payments received</h3>
+              <div className={table.wrap + ' border border-slate-200 rounded-md'}>
+                <table className={table.table}>
+                  <thead className={table.head}>
+                    <tr>
+                      <th className={table.th}>Date</th>
+                      <th className={table.th}>Method</th>
+                      <th className={table.th}>Reference / note</th>
+                      <th className={table.thNum}>Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className={table.body}>
+                    {detail.payments.map(p => (
+                      <tr key={p.id}>
+                        <td className={table.td + ' whitespace-nowrap'}>{formatDate(p.payment_date)}</td>
+                        <td className={table.td}>{p.payment_method}</td>
+                        <td className={table.td + ' text-slate-600'}>{[p.reference, p.note].filter(Boolean).join(' · ') || '—'}</td>
+                        <td className={table.tdNum + ' font-medium'}>{formatMoney(p.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </Modal>
       )}
 
       {/* Record payment */}
       {payTarget && (
-        <div className="fixed inset-0 bg-slate-900/60 z-[60] flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 border border-slate-200 max-h-[95vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-              <h3 className="font-bold text-slate-900 text-lg">Record payment</h3>
-              <button onClick={() => setPayTarget(null)} aria-label="Close" className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+        <Modal
+          title="Record payment"
+          size="md"
+          onClose={() => !submitting && setPayTarget(null)}
+          footer={
+            <>
+              <Button onClick={() => setPayTarget(null)} disabled={submitting}>Cancel</Button>
+              <Button variant="primary" type="submit" form="payment-form" loading={submitting} disabled={!payAmount.trim()}>
+                {submitting ? 'Recording…' : 'Record payment'}
+              </Button>
+            </>
+          }
+        >
+          <dl className="rounded-md border border-slate-200 bg-slate-50 p-3 mb-4 text-sm space-y-1">
+            <Line label="Invoice" value={payTarget.invoice_number} />
+            <Line label="Total" value={formatMoney(payTarget.total_amount)} />
+            <Line label="Already paid" value={formatMoney(payTarget.amount_paid)} />
+            <Line label="Outstanding" value={formatMoney(balanceOf(payTarget))} strong className="text-amber-800" />
+          </dl>
+
+          {payError && <div className="mb-3"><Alert kind="error">{payError}</Alert></div>}
+
+          <form id="payment-form" onSubmit={submitPayment} className="space-y-3">
+            <div className="flex items-end gap-2">
+              <Input label="Payment amount (INR)" required inputMode="decimal" value={payAmount} onChange={e => setPayAmount(e.target.value)} wrapperClassName="flex-1" hint="Enter less than the outstanding amount for a partial payment." />
+              <Button size="sm" onClick={() => setPayAmount(String(balanceOf(payTarget)))} className="mb-6">Full balance</Button>
             </div>
-            <form onSubmit={submitPayment} className="mt-4 space-y-4 text-sm">
-              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs space-y-1">
-                <Row label="Invoice" value={payTarget.invoice_number} />
-                <Row label="Total" value={formatMoney(payTarget.total_amount)} />
-                <Row label="Already paid" value={formatMoney(payTarget.amount_paid)} className="text-emerald-700" />
-                <Row label="Outstanding" value={formatMoney(balanceOf(payTarget))} className="font-bold text-amber-700" />
-              </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Select label="Payment method" required value={payMethod} onChange={e => setPayMethod(e.target.value as (typeof METHODS)[number])}>
+                {METHODS.map(m => <option key={m}>{m}</option>)}
+              </Select>
+              <Input label="Payment date" type="date" required value={payDate} onChange={e => setPayDate(e.target.value)} />
+            </div>
+            <Input label="Reference" value={payRef} onChange={e => setPayRef(e.target.value)} placeholder="Transaction or cheque number" />
+            <Input label="Note" value={payNote} onChange={e => setPayNote(e.target.value)} />
+          </form>
+        </Modal>
+      )}
 
-              {payError && <Alert kind="error">{payError}</Alert>}
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1" htmlFor="pay-amount">Amount</label>
-                <div className="flex gap-2">
-                  <input
-                    id="pay-amount"
-                    inputMode="decimal"
-                    required
-                    value={payAmount}
-                    onChange={e => setPayAmount(e.target.value)}
-                    placeholder="0.00"
-                    className="flex-1 border border-slate-300 rounded-lg p-2 font-mono font-bold"
-                  />
-                  <button type="button" onClick={() => setPayAmount(String(balanceOf(payTarget)))} className="px-3 text-xs font-semibold border border-slate-300 rounded-lg hover:bg-slate-50">
-                    Full balance
-                  </button>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-1">Pay less than the outstanding amount for a partial payment. The server rejects overpayment.</p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1" htmlFor="pay-method">Method</label>
-                <select id="pay-method" value={payMethod} onChange={e => setPayMethod(e.target.value as any)} className="w-full border border-slate-300 rounded-lg p-2 bg-white">
-                  {METHODS.map(m => <option key={m}>{m}</option>)}
-                </select>
-              </div>
-              <input value={payRef} onChange={e => setPayRef(e.target.value)} placeholder="Reference (optional)" className="w-full border border-slate-300 rounded-lg p-2" />
-              <input value={payNote} onChange={e => setPayNote(e.target.value)} placeholder="Note (optional)" className="w-full border border-slate-300 rounded-lg p-2" />
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                <button type="button" onClick={() => setPayTarget(null)} className="px-4 py-2 border border-slate-300 rounded-lg font-semibold hover:bg-slate-50">Cancel</button>
-                <button type="submit" disabled={submitting || !payAmount.trim()} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold disabled:opacity-50">
-                  {submitting ? 'Recording…' : 'Record payment'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {cancelTarget && (
+        <ConfirmDialog
+          title="Cancel this invoice?"
+          message={`Invoice ${cancelTarget.invoice_number} will be cancelled. Its billing period is kept and will not be invoiced again.`}
+          confirmLabel="Cancel invoice"
+          danger
+          busy={busyId === cancelTarget.id}
+          onConfirm={cancelInvoice}
+          onCancel={() => setCancelTarget(null)}
+        />
       )}
     </div>
   );
 };
 
-const Row: React.FC<{ label: string; value: string; className?: string }> = ({ label, value, className = '' }) => (
-  <div className={`flex justify-between gap-4 text-slate-600 ${className}`}>
-    <span>{label}</span>
-    <span className="font-mono">{value}</span>
+const Line: React.FC<{ label: string; value: string; strong?: boolean; className?: string }> = ({ label, value, strong, className }) => (
+  <div className={cx('flex justify-between gap-6', strong ? 'font-semibold text-slate-900' : 'text-slate-600', className)}>
+    <dt>{label}</dt>
+    <dd className="tabular-nums">{value}</dd>
   </div>
 );

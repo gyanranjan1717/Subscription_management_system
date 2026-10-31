@@ -41,7 +41,7 @@ A *dry run* executes steps 1–5 inside an outer transaction and rolls it back.
 
 ## Frontend
 
-React + Tailwind, no UI library. `services/api.ts` is the only place that calls the API; amounts are displayed with `lib/format.ts` and never calculated in the browser. Lists use server-side pagination and search (`components/Pager.tsx`), statuses use one `StatusBadge`, and errors/success use inline `Alert`s. Navigation is filtered by role for convenience; authorisation is on the server.
+React + Tailwind, no UI library. `components/ui.tsx` is the design system: Button, Input/Select/Textarea/Checkbox (always labelled), Modal and ConfirmDialog (focus trap, Escape, restored focus), PageHeader, Card, Stat, Tabs, table class set, StatusBadge (text plus colour), Alert, toasts, Loading / EmptyState / ErrorState. `services/api.ts` is the only place that calls the API; amounts are displayed with `lib/format.ts` (INR, one date format) and never calculated in the browser, except an exact-cents list-price preview (product price + variant extra) on the catalog and the new-subscription review, which the server recomputes and fixes when the line is saved. Lists use server-side pagination and search (`components/Pager.tsx`). Navigation is filtered by role for convenience and scrolls sideways on narrow screens; authorisation is on the server.
 
 ## Testing
 

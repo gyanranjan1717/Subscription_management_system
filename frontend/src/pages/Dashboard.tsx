@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api.js';
 import { DashboardMetrics } from '../types.js';
-import { Alert, EmptyState, Loading } from '../components/ui.js';
-import { addDaysIso, formatMoney, today } from '../lib/format.js';
+import { Alert, Button, Card, EmptyState, ErrorState, Input, Loading, PageHeader, Stat, StatusBadge, table, useToast } from '../components/ui.js';
+import { addDaysIso, formatDate, formatDateTime, formatMoney, today } from '../lib/format.js';
 import { Download, PlayCircle, RefreshCw, Send } from 'lucide-react';
 
 interface DashboardProps {
@@ -19,34 +19,19 @@ const PRESETS: Array<{ label: string; range: () => { from: string; to: string } 
   { label: 'Last 90 days', range: () => ({ from: addDaysIso(today(), -90), to: today() }) }
 ];
 
-const STATUS_ORDER: Array<[keyof DashboardMetrics['subscriptions'], string, string]> = [
-  ['active', 'Active', 'bg-emerald-500'],
-  ['confirmed', 'Confirmed', 'bg-blue-500'],
-  ['quotation', 'Quotation', 'bg-amber-500'],
-  ['draft', 'Draft', 'bg-slate-400'],
-  ['paused', 'Paused', 'bg-orange-500'],
-  ['closed', 'Closed', 'bg-slate-600']
+const STATUS_ORDER: Array<[keyof DashboardMetrics['subscriptions'], string]> = [
+  ['active', 'Active'], ['confirmed', 'Confirmed'], ['quotation', 'Quotation'], ['draft', 'Draft'], ['paused', 'Paused'], ['closed', 'Closed']
 ];
 
-const Card: React.FC<{ label: string; value: string; sub?: string; tone?: 'default' | 'good' | 'warn' | 'bad' }> = ({ label, value, sub, tone = 'default' }) => {
-  const color = tone === 'good' ? 'text-emerald-700' : tone === 'warn' ? 'text-amber-700' : tone === 'bad' ? 'text-red-700' : 'text-slate-900';
-  return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className={`text-2xl font-black mt-1 ${color}`}>{value}</div>
-      {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
-    </div>
-  );
-};
-
 export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNavigateToBilling }) => {
+  const toast = useToast();
   const [data, setData] = useState<Data | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [preset, setPreset] = useState(0);
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [rangeError, setRangeError] = useState<string | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
 
   const load = async (range?: { from?: string; to?: string }) => {
@@ -55,7 +40,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
     try {
       setData(await api.getSummary(range));
     } catch (err: any) {
-      setError('Could not load the dashboard: ' + err.message);
+      setError('Unable to load dashboard data. ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -67,6 +52,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
 
   const applyPreset = (i: number) => {
     setPreset(i);
+    setRangeError(null);
     const r = PRESETS[i].range();
     setFrom(r?.from ?? '');
     setTo(r?.to ?? '');
@@ -74,6 +60,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
   };
 
   const applyCustom = () => {
+    if (from && to && to < from) {
+      setRangeError('The end date cannot be before the start date.');
+      return;
+    }
+    setRangeError(null);
     setPreset(-1);
     load({ from: from || undefined, to: to || undefined });
   };
@@ -81,9 +72,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
   const remind = async (id: number) => {
     setSendingId(id);
     try {
-      setNotice((await api.sendInvoice(id)).message);
+      toast('success', (await api.sendInvoice(id)).message);
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     } finally {
       setSendingId(null);
     }
@@ -93,104 +84,135 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
     try {
       await api.downloadCsv(kind);
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     }
   };
 
   if (!data) {
-    return loading ? <Loading label="Loading dashboard…" /> : <Alert kind="error">{error ?? 'No data.'}</Alert>;
+    return (
+      <>
+        <PageHeader title="Dashboard" />
+        {loading ? <Loading label="Loading dashboard…" /> : <ErrorState message={error ?? 'Unable to load dashboard data.'} onRetry={() => load()} />}
+      </>
+    );
   }
 
   const m = data.metrics;
-  const totalSubs = m.subscriptions.total || 1;
-  const periodLabel = m.period?.from || m.period?.to ? `${m.period?.from ?? '…'} → ${m.period?.to ?? '…'}` : 'all time';
+  const f = m.financials;
+  const periodLabel = m.period?.from || m.period?.to ? `${formatDate(m.period?.from)} to ${formatDate(m.period?.to)}` : 'all time';
+  const attention: string[] = [];
+  if (f.overdueCount > 0) attention.push(`${f.overdueCount} overdue invoice${f.overdueCount === 1 ? '' : 's'}, ${formatMoney(f.overdueAmount)} outstanding past due date`);
+  if (m.subscriptions.quotation > 0) attention.push(`${m.subscriptions.quotation} quotation${m.subscriptions.quotation === 1 ? '' : 's'} waiting for confirmation`);
+  if (m.subscriptions.draft > 0) attention.push(`${m.subscriptions.draft} draft subscription${m.subscriptions.draft === 1 ? '' : 's'} not yet sent`);
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+    <div>
+      <PageHeader
+        title="Dashboard"
+        subtitle="Subscriptions, revenue and receivables"
+        actions={
+          <>
+            <Button onClick={() => load(from || to ? { from: from || undefined, to: to || undefined } : undefined)} disabled={loading}>
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" /> Refresh
+            </Button>
+            <Button variant="primary" onClick={onNavigateToBilling}>
+              <PlayCircle className="w-3.5 h-3.5" aria-hidden="true" /> Go to billing run
+            </Button>
+          </>
+        }
+      />
+
+      {error && <div className="mb-4"><Alert kind="error" onClose={() => setError(null)}>{error}</Alert></div>}
+
+      {/* What needs attention */}
+      <div className={`mb-5 rounded-lg border px-4 py-3 text-sm ${attention.length ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+        <div className="font-medium mb-0.5">{attention.length ? 'Needs attention' : 'Nothing needs attention'}</div>
+        {attention.length ? (
+          <ul className="list-disc list-inside text-sm">{attention.map(a => <li key={a}>{a}</li>)}</ul>
+        ) : (
+          <div>No overdue invoices and no pending quotations or drafts.</div>
+        )}
+      </div>
+
+      {/* Period */}
+      <div className="mb-5 flex flex-wrap items-end gap-x-4 gap-y-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Finance Dashboard</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Aggregated in the database, computed in {m.performance.queryExecutionTimeMs} ms. Period filter applies to invoiced and collected; the receivables book is always as of today.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button onClick={() => load(from || to ? { from: from || undefined, to: to || undefined } : undefined)} disabled={loading} className="px-3 py-2 border border-slate-300 rounded-lg text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 disabled:opacity-50">
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
-          </button>
-          <button onClick={onNavigateToBilling} className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5">
-            <PlayCircle className="w-3.5 h-3.5" /> Billing run
-          </button>
-        </div>
-      </div>
-
-      {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
-      {notice && <Alert kind="success" onClose={() => setNotice(null)}>{notice}</Alert>}
-
-      {/* Period filter */}
-      <div className="flex flex-wrap items-center gap-2">
-        {PRESETS.map((p, i) => (
-          <button
-            key={p.label}
-            onClick={() => applyPreset(i)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${preset === i ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}
-          >
-            {p.label}
-          </button>
-        ))}
-        <span className="mx-1 text-slate-300">|</span>
-        <input type="date" value={from} onChange={e => setFrom(e.target.value)} aria-label="From" className="border border-slate-300 rounded-lg px-2 py-1 text-xs" />
-        <span className="text-xs text-slate-400">to</span>
-        <input type="date" value={to} onChange={e => setTo(e.target.value)} aria-label="To" className="border border-slate-300 rounded-lg px-2 py-1 text-xs" />
-        <button onClick={applyCustom} className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 hover:bg-slate-50">Apply</button>
-      </div>
-
-      <div className={`grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 ${loading ? 'opacity-60' : ''}`}>
-        <Card label="Active subscriptions" value={String(m.subscriptions.active)} sub={`of ${m.subscriptions.total} total`} tone="good" />
-        <Card label="Monthly recurring revenue" value={formatMoney(m.recurringRevenue.mrr)} sub={`ARR ${formatMoney(m.recurringRevenue.arr)}`} />
-        <Card label={`Invoiced (${periodLabel})`} value={formatMoney(m.financials.totalInvoiced)} />
-        <Card label={`Payments received (${periodLabel})`} value={formatMoney(m.financials.totalCollected)} sub={`${m.period?.paymentsCount ?? 0} payment(s)`} tone="good" />
-        <Card label="Outstanding (as of today)" value={formatMoney(m.financials.totalOwed)} tone={m.financials.totalOwed > 0 ? 'warn' : 'good'} />
-        <Card label="Overdue invoices" value={String(m.financials.overdueCount)} sub={`${formatMoney(m.financials.overdueAmount)} overdue`} tone={m.financials.overdueCount > 0 ? 'bad' : 'good'} />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Overdue list */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 font-bold text-slate-900 text-sm flex items-center justify-between">
-            Overdue invoices to chase
-            <span className="text-xs font-semibold text-red-700">{m.financials.overdueCount} overdue · top 20 shown</span>
+          <div className="text-xs font-medium text-slate-700 mb-1">Period for invoiced and payments</div>
+          <div className="flex flex-wrap gap-1" role="group" aria-label="Period presets">
+            {PRESETS.map((p, i) => (
+              <Button key={p.label} size="sm" variant={preset === i ? 'primary' : 'secondary'} aria-pressed={preset === i} onClick={() => applyPreset(i)}>
+                {p.label}
+              </Button>
+            ))}
           </div>
+        </div>
+        <div className="flex items-end gap-2">
+          <Input label="From" type="date" value={from} onChange={e => setFrom(e.target.value)} />
+          <Input label="To" type="date" value={to} min={from || undefined} onChange={e => setTo(e.target.value)} error={rangeError} />
+          <Button onClick={applyCustom} className="mb-0.5">Apply</Button>
+        </div>
+      </div>
+
+      <div className={loading ? 'opacity-60 transition-opacity' : ''} aria-busy={loading}>
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Recurring revenue</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+          <Stat label="Active subscriptions" value={String(m.subscriptions.active)} sub={`${m.subscriptions.total} subscriptions in total`} />
+          <Stat label="Monthly recurring revenue (MRR)" value={formatMoney(m.recurringRevenue.mrr)} sub="Active subscriptions, before tax and discount" />
+          <Stat label="Annual recurring revenue (ARR)" value={formatMoney(m.recurringRevenue.arr)} sub="MRR × 12" />
+        </div>
+
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Billing and collections, {periodLabel}</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+          <Stat label="Invoiced" value={formatMoney(f.totalInvoiced)} sub="Confirmed and paid invoices issued in the period" />
+          <Stat label="Payments received" value={formatMoney(f.totalCollected)} sub={`${m.period?.paymentsCount ?? 0} payment${m.period?.paymentsCount === 1 ? '' : 's'} recorded in the period`} tone="good" />
+        </div>
+
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Receivables, as of today</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+          <Stat label="Outstanding" value={formatMoney(f.totalOwed)} sub="Unpaid balance on confirmed invoices" tone={f.totalOwed > 0 ? 'warn' : 'good'} />
+          <Stat label="Overdue" value={formatMoney(f.overdueAmount)} sub={`${f.overdueCount} invoice${f.overdueCount === 1 ? '' : 's'} past due date`} tone={f.overdueCount > 0 ? 'bad' : 'good'} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <Card
+          className="lg:col-span-2"
+          title="Overdue invoices"
+          description={f.overdueCount > 20 ? `Largest 20 of ${f.overdueCount} shown` : undefined}
+          flush
+        >
           {data.overdueInvoices.length === 0 ? (
-            <EmptyState title="Nothing overdue" hint="Every confirmed invoice is within its payment terms or paid." />
+            <EmptyState title="No overdue invoices" hint="Every confirmed invoice is paid or still within its payment terms." />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+            <div className={table.wrap}>
+              <table className={table.table}>
+                <thead className={table.head}>
                   <tr>
-                    <th className="px-4 py-2">Invoice</th>
-                    <th className="px-4 py-2">Customer</th>
-                    <th className="px-4 py-2 hidden sm:table-cell">Due</th>
-                    <th className="px-4 py-2 text-right">Outstanding</th>
-                    <th className="px-4 py-2 text-right">Chase</th>
+                    <th className={table.th}>Invoice</th>
+                    <th className={table.th}>Customer</th>
+                    <th className={table.th}>Due</th>
+                    <th className={table.thNum}>Outstanding</th>
+                    <th className={table.thNum}><span className="sr-only">Actions</span></th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className={table.body}>
                   {data.overdueInvoices.map(inv => (
-                    <tr key={inv.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-2">
-                        <button onClick={() => onNavigateToInvoice(inv.id)} className="font-semibold text-odoo-500 hover:underline">{inv.invoice_number}</button>
+                    <tr key={inv.id} className={table.row}>
+                      <td className={table.td}>
+                        <button onClick={() => onNavigateToInvoice(inv.id)} className="font-medium text-brand-700 hover:underline whitespace-nowrap">{inv.invoice_number}</button>
                       </td>
-                      <td className="px-4 py-2">
-                        <div className="font-medium text-slate-900">{inv.customer_name}</div>
-                        <div className="text-slate-400">{inv.company_name}</div>
+                      <td className={table.td}>
+                        <div className="text-slate-900">{inv.customer_name}</div>
+                        <div className="text-xs text-slate-500">{inv.company_name}</div>
                       </td>
-                      <td className="px-4 py-2 text-red-600 font-semibold hidden sm:table-cell">{inv.due_date}</td>
-                      <td className="px-4 py-2 text-right font-bold">{formatMoney(inv.balance_due)}</td>
-                      <td className="px-4 py-2 text-right">
-                        <button disabled={sendingId === inv.id} onClick={() => remind(inv.id)} className="px-2 py-1 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded font-semibold inline-flex items-center gap-1 disabled:opacity-50">
-                          <Send className="w-3 h-3" /> {sendingId === inv.id ? 'Sending…' : 'Send'}
-                        </button>
+                      <td className={table.td}>
+                        <span className="whitespace-nowrap text-red-700">{formatDate(inv.due_date)}</span>
+                      </td>
+                      <td className={table.tdNum + ' font-medium'}>{formatMoney(inv.balance_due)}</td>
+                      <td className={table.tdNum}>
+                        <Button size="sm" loading={sendingId === inv.id} onClick={() => remind(inv.id)} aria-label={`Send ${inv.invoice_number} to customer`}>
+                          <Send className="w-3 h-3" aria-hidden="true" /> Send
+                        </Button>
                       </td>
                     </tr>
                   ))}
@@ -198,68 +220,65 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
               </table>
             </div>
           )}
-        </div>
+        </Card>
 
-        {/* Subscription status + plans */}
-        <div className="space-y-6">
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-            <div className="font-bold text-slate-900 text-sm mb-3">Subscriptions by status</div>
-            <div className="space-y-2">
-              {STATUS_ORDER.map(([key, label, color]) => (
-                <div key={key} className="text-xs">
-                  <div className="flex justify-between text-slate-600">
-                    <span>{label}</span>
-                    <strong>{m.subscriptions[key]}</strong>
-                  </div>
-                  <div className="h-1.5 bg-slate-100 rounded">
-                    <div className={`h-1.5 rounded ${color}`} style={{ width: `${Math.round((m.subscriptions[key] / totalSubs) * 100)}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+        <div className="space-y-5">
+          <Card title="Subscriptions by status" flush>
+            <table className={table.table}>
+              <tbody className={table.body}>
+                {STATUS_ORDER.map(([key, label]) => (
+                  <tr key={key}>
+                    <td className={table.td}><StatusBadge status={label} /></td>
+                    <td className={table.tdNum + ' font-medium'}>{m.subscriptions[key]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-            <div className="font-bold text-slate-900 text-sm mb-3">Subscriptions per plan</div>
+          <Card title="Subscriptions per plan" flush>
             {data.planBreakdown.length === 0 ? (
               <EmptyState title="No plans yet" />
             ) : (
-              <ul className="divide-y divide-slate-100 text-xs">
-                {data.planBreakdown.map((p, i) => (
-                  <li key={i} className="py-2 flex justify-between">
-                    <span>{p.name} <span className="text-slate-400">({p.billing_interval})</span></span>
-                    <strong>{p.count}</strong>
-                  </li>
-                ))}
-              </ul>
+              <table className={table.table}>
+                <tbody className={table.body}>
+                  {data.planBreakdown.map((p, i) => (
+                    <tr key={i}>
+                      <td className={table.td}>
+                        {p.name}
+                        <span className="text-xs text-slate-500 capitalize"> · {p.billing_interval}</span>
+                      </td>
+                      <td className={table.tdNum + ' font-medium'}>{p.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-            <div className="font-bold text-slate-900 text-sm mb-2">Export</div>
+          <Card title="Export">
             <div className="flex gap-2">
-              <button onClick={() => exportCsv('invoices')} className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-xs font-semibold hover:bg-slate-50 flex items-center justify-center gap-1.5"><Download className="w-3.5 h-3.5" /> Invoices</button>
-              <button onClick={() => exportCsv('subscriptions')} className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-xs font-semibold hover:bg-slate-50 flex items-center justify-center gap-1.5"><Download className="w-3.5 h-3.5" /> Subscriptions</button>
+              <Button className="flex-1" onClick={() => exportCsv('invoices')}><Download className="w-3.5 h-3.5" aria-hidden="true" /> Invoices CSV</Button>
+              <Button className="flex-1" onClick={() => exportCsv('subscriptions')}><Download className="w-3.5 h-3.5" aria-hidden="true" /> Subscriptions CSV</Button>
             </div>
-          </div>
+          </Card>
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-        <div className="font-bold text-slate-900 text-sm mb-2">Recent activity</div>
+      <Card className="mt-5" title="Recent activity" description="Latest entries from the audit log" flush>
         {data.recentEvents.length === 0 ? (
-          <EmptyState title="No activity yet" />
+          <EmptyState title="No activity recorded yet" />
         ) : (
-          <ul className="divide-y divide-slate-100 text-xs">
+          <ul className="divide-y divide-slate-100 text-sm">
             {data.recentEvents.map(e => (
-              <li key={e.id} className="py-2 flex flex-col sm:flex-row sm:justify-between gap-1">
+              <li key={e.id} className="px-4 py-2 flex flex-col sm:flex-row sm:justify-between gap-0.5">
                 <span className="text-slate-700">{e.description}</span>
-                <span className="text-slate-400 font-mono">{e.created_at}</span>
+                <span className="text-xs text-slate-500 whitespace-nowrap">{formatDateTime(e.created_at)}</span>
               </li>
             ))}
           </ul>
         )}
-      </div>
+      </Card>
     </div>
   );
 };

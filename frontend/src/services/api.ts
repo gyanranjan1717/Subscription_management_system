@@ -18,10 +18,10 @@ export interface IntegrityReport {
 const API_BASE = '/api';
 
 export const DEMO_USERS = {
-  admin: { email: 'admin@brightloop.com', password: 'Brightloop#2026', label: '👑 Admin (Alex Mercer)' },
-  staff: { email: 'staff@brightloop.com', password: 'Brightloop#2026', label: '💼 Staff (Sarah Jenkins)' },
-  customer1: { email: 'acme@corp.com', password: 'Customer#2026', label: '🏢 Customer 1 (Acme Corp)' },
-  customer2: { email: 'globex@biz.com', password: 'Customer#2026', label: '🌐 Customer 2 (Globex Inc)' }
+  admin: { email: 'admin@brightloop.com', password: 'Brightloop#2026', label: 'Admin: Alex Mercer', short: 'Admin' },
+  staff: { email: 'staff@brightloop.com', password: 'Brightloop#2026', label: 'Staff: Sarah Jenkins', short: 'Staff' },
+  customer1: { email: 'acme@corp.com', password: 'Customer#2026', label: 'Customer: Acme Corporation', short: 'Customer: Acme' },
+  customer2: { email: 'globex@biz.com', password: 'Customer#2026', label: 'Customer: Globex International', short: 'Customer: Globex' }
 };
 
 let currentToken: string | null = localStorage.getItem('brightloop_token');

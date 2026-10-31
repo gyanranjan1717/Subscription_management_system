@@ -123,6 +123,8 @@ analyticsRouter.get('/benchmark', handle((_req, res) => {
   });
 }));
 
+const MONEY_COLUMNS = new Set(['subtotal', 'tax_amount', 'discount_amount', 'total_amount', 'amount_paid', 'balance_due']);
+
 function sendCsv(res: import('express').Response, filename: string, header: string[], rows: unknown[][]): void {
   const body = [header.map(csvField).join(','), ...rows.map(r => r.map(csvField).join(','))].join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -150,5 +152,5 @@ analyticsRouter.get('/export/invoices', handle((_req, res) => {
   );
   sendCsv(res, 'brightloop_invoices.csv',
     ['Invoice Number', 'Subscription Number', 'Customer', 'Period Start', 'Period End', 'Subtotal', 'Tax', 'Discount', 'Total', 'Paid', 'Balance Due', 'Status', 'Issue Date', 'Due Date'],
-    rows.map(r => Object.values(r)));
+    rows.map(r => Object.entries(r).map(([k, v]) => (MONEY_COLUMNS.has(k) && typeof v === 'number' ? v.toFixed(2) : v))));
 }));
