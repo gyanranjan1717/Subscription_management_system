@@ -1,4 +1,5 @@
 import { queryOne, execute } from '../db/database.js';
+import { allocate, percentOf, Cents, toCents } from '../lib/money.js';
 
 export interface DiscountRule {
   id: number;
@@ -17,93 +18,91 @@ export interface DiscountRule {
   is_active: number;
 }
 
-export interface DiscountEvaluationResult {
+export interface DiscountableLine {
+  productId: number | null;
+  quantity: number;
+  grossCents: Cents;
+}
+
+export interface DiscountResult {
   applicable: boolean;
   reason?: string;
-  discountAmount: number;
-  discountRule?: DiscountRule;
+  /** Discount per input line, in cents; sums to totalCents exactly. */
+  perLineCents: Cents[];
+  totalCents: Cents;
+  rule?: DiscountRule;
 }
 
-export function evaluateDiscount(
-  discountRuleId: number | null | undefined,
-  subtotal: number,
-  totalQuantity: number,
-  asOfDate: string = new Date().toISOString().split('T')[0],
-  productLines?: Array<{ productId: number; quantity: number; lineTotal: number }>
-): DiscountEvaluationResult {
-  if (!discountRuleId) {
-    return { applicable: false, discountAmount: 0 };
-  }
+const NONE: DiscountResult = { applicable: false, perLineCents: [], totalCents: 0 };
+const none = (lines: DiscountableLine[], reason?: string): DiscountResult =>
+  ({ ...NONE, perLineCents: lines.map(() => 0), reason });
 
-  const rule = queryOne<DiscountRule>(
-    'SELECT * FROM discount_rules WHERE id = ? AND is_active = 1',
-    [discountRuleId]
-  );
+export function loadDiscountRule(id: number | null | undefined): DiscountRule | null {
+  if (!id) return null;
+  return queryOne<DiscountRule>('SELECT * FROM discount_rules WHERE id = ? AND is_active = 1', [id]);
+}
 
-  if (!rule) {
-    return { applicable: false, reason: 'Discount rule not found or inactive', discountAmount: 0 };
-  }
+/**
+ * Pure server-side discount calculation. Validity (dates, usage cap, minimums) is decided here and
+ * nowhere else; the client never sends or computes a discount amount.
+ *
+ *  - product scope: only lines of `target_product_id`; percentage per line, fixed amount per line (capped at the line).
+ *  - all / subscription scope: applied to the whole invoice; the total is spread over lines with
+ *    largest-remainder allocation so line discounts add up exactly (tax is then computed per line).
+ */
+export function computeDiscount(rule: DiscountRule | null, lines: DiscountableLine[], asOfDate: string): DiscountResult {
+  if (!rule || !rule.is_active) return none(lines, 'Discount rule not found or inactive');
 
-  // 1. Check date bounds
-  if (rule.start_date && asOfDate < rule.start_date) {
-    return { applicable: false, reason: `Discount is not yet valid (starts ${rule.start_date})`, discountAmount: 0 };
-  }
-  if (rule.end_date && asOfDate > rule.end_date) {
-    return { applicable: false, reason: `Discount has expired (ended ${rule.end_date})`, discountAmount: 0 };
-  }
-
-  // 2. Check usage limit
+  if (rule.start_date && asOfDate < rule.start_date) return none(lines, `Discount is not yet valid (starts ${rule.start_date})`);
+  if (rule.end_date && asOfDate > rule.end_date) return none(lines, `Discount has expired (ended ${rule.end_date})`);
   if (rule.max_uses > 0 && rule.current_uses >= rule.max_uses) {
-    return { applicable: false, reason: `Discount usage limit reached (${rule.current_uses}/${rule.max_uses})`, discountAmount: 0 };
+    return none(lines, `Discount usage limit reached (${rule.current_uses}/${rule.max_uses})`);
   }
 
-  // 3. Check min purchase amount
-  if (rule.min_amount > 0 && subtotal < rule.min_amount) {
-    return { applicable: false, reason: `Minimum order amount of $${rule.min_amount} not met (current: $${subtotal})`, discountAmount: 0 };
+  const productScope = rule.applies_to === 'product';
+  const eligible = lines.map(l => (productScope ? l.productId === rule.target_product_id : true) && l.grossCents > 0);
+  const eligibleGross = lines.reduce((s, l, i) => s + (eligible[i] ? l.grossCents : 0), 0);
+  const eligibleQty = lines.reduce((s, l, i) => s + (eligible[i] ? l.quantity : 0), 0);
+
+  if (eligibleGross <= 0) return none(lines, 'No eligible lines for this discount');
+  if (rule.min_amount > 0 && eligibleGross < toCents(rule.min_amount)) {
+    return none(lines, `Minimum purchase of ${rule.min_amount} not met`);
+  }
+  if (rule.min_quantity > 0 && eligibleQty < rule.min_quantity) {
+    return none(lines, `Minimum quantity of ${rule.min_quantity} not met`);
   }
 
-  // 4. Check min quantity
-  if (rule.min_quantity > 0 && totalQuantity < rule.min_quantity) {
-    return { applicable: false, reason: `Minimum quantity of ${rule.min_quantity} not met (current: ${totalQuantity})`, discountAmount: 0 };
-  }
+  const valueCents = toCents(rule.value);
+  let perLine: Cents[];
 
-  // 5. Calculate discount amount
-  let discountAmount = 0;
-
-  if (rule.applies_to === 'product' && rule.target_product_id && productLines) {
-    // Apply discount only to the specific target product line(s)
-    const matchingLines = productLines.filter(l => l.productId === rule.target_product_id);
-    const targetSubtotal = matchingLines.reduce((sum, l) => sum + l.lineTotal, 0);
-    if (targetSubtotal <= 0) {
-      return { applicable: false, reason: 'Target product not in order', discountAmount: 0 };
-    }
-
-    if (rule.discount_type === 'percentage') {
-      discountAmount = (targetSubtotal * rule.value) / 100;
-    } else {
-      discountAmount = Math.min(rule.value, targetSubtotal);
-    }
+  if (productScope) {
+    perLine = lines.map((l, i) => {
+      if (!eligible[i]) return 0;
+      return rule.discount_type === 'percentage'
+        ? percentOf(l.grossCents, rule.value)
+        : Math.min(valueCents, l.grossCents);
+    });
   } else {
-    // Applies to whole subscription
-    if (rule.discount_type === 'percentage') {
-      discountAmount = (subtotal * rule.value) / 100;
-    } else {
-      discountAmount = Math.min(rule.value, subtotal);
-    }
+    const total = rule.discount_type === 'percentage'
+      ? percentOf(eligibleGross, rule.value)
+      : Math.min(valueCents, eligibleGross);
+    perLine = allocate(total, lines.map((l, i) => (eligible[i] ? l.grossCents : 0)));
   }
 
-  discountAmount = Number(discountAmount.toFixed(2));
-
-  return {
-    applicable: true,
-    discountAmount,
-    discountRule: rule
-  };
+  const totalCents = perLine.reduce((a, b) => a + b, 0);
+  if (totalCents <= 0) return none(lines, 'Discount amount is zero');
+  return { applicable: true, perLineCents: perLine, totalCents, rule };
 }
 
-export function recordDiscountUsage(discountRuleId: number): void {
-  execute(
-    'UPDATE discount_rules SET current_uses = current_uses + 1 WHERE id = ?',
-    [discountRuleId]
+/**
+ * Atomically consumes one use of a rule. The WHERE clause is the guard, so two concurrent invoices
+ * can never both take the last use; callers must be inside a transaction with the invoice insert.
+ */
+export function claimDiscountUse(ruleId: number): boolean {
+  const res = execute(
+    `UPDATE discount_rules SET current_uses = current_uses + 1
+     WHERE id = ? AND is_active = 1 AND (max_uses = 0 OR current_uses < max_uses)`,
+    [ruleId]
   );
+  return res.changes === 1;
 }

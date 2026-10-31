@@ -1,273 +1,357 @@
-import { queryAll, queryOne, execute, runTransaction } from '../db/database.js';
-import { calculateTax } from './taxEngine.js';
-import { evaluateDiscount, recordDiscountUsage } from './discountEngine.js';
+import { queryAll, queryOne, execute, runTransaction, nextSequence } from '../db/database.js';
+import { addDays, addMonthsClamped, BillingInterval, paymentTermDays, periodStart, todayIso } from '../lib/dates.js';
+import { fromCents, toCents } from '../lib/money.js';
+import { TaxTable } from './taxEngine.js';
+import { calculateInvoice, BillableLine } from './invoiceCalculator.js';
+import { claimDiscountUse, loadDiscountRule } from './discountEngine.js';
+import { audit } from './audit.js';
+
+/** Safety valve for a single subscription in a single run (e.g. a daily plan unbilled for years). */
+export const MAX_PERIODS_PER_SUBSCRIPTION_PER_RUN = 1000;
+
+export interface BillingRunOptions {
+  operatorUserId?: number;
+  /** Compute everything, then roll back: nothing is persisted. */
+  dryRun?: boolean;
+  /** Create invoices as Confirmed instead of Draft. */
+  autoConfirm?: boolean;
+}
+
+export interface BillingDetail {
+  subscriptionNumber: string;
+  invoiceNumber?: string;
+  periodStart?: string;
+  amount?: number;
+  status: 'created' | 'already_billed' | 'auto_closed' | 'error';
+  reason?: string;
+}
 
 export interface BillingRunResult {
   asOfDate: string;
+  dryRun: boolean;
   processedCount: number;
   invoicesCreated: number;
   skippedDuplicates: number;
+  errors: number;
   totalBilledAmount: number;
   invoiceIds: number[];
-  details: Array<{
-    subscriptionNumber: string;
-    invoiceNumber?: string;
-    amount?: number;
-    status: 'created' | 'already_billed' | 'auto_closed' | 'error';
-    reason?: string;
-  }>;
+  details: BillingDetail[];
 }
 
-export function computeNextDate(currentDateStr: string, interval: 'daily' | 'weekly' | 'monthly' | 'yearly'): string {
-  const d = new Date(currentDateStr);
-  if (interval === 'daily') {
-    d.setDate(d.getDate() + 1);
-  } else if (interval === 'weekly') {
-    d.setDate(d.getDate() + 7);
-  } else if (interval === 'monthly') {
-    d.setMonth(d.getMonth() + 1);
-  } else if (interval === 'yearly') {
-    d.setFullYear(d.getFullYear() + 1);
+/** Next date after `currentDateStr` for one interval (used for renewals; billing uses periodStart()). */
+export function computeNextDate(currentDateStr: string, interval: BillingInterval): string {
+  switch (interval) {
+    case 'daily': return addDays(currentDateStr, 1);
+    case 'weekly': return addDays(currentDateStr, 7);
+    case 'monthly': return addMonthsClamped(currentDateStr, 1);
+    case 'yearly': return addMonthsClamped(currentDateStr, 12);
   }
-  return d.toISOString().split('T')[0];
 }
 
-export function runBillingCycle(asOfDate: string = new Date().toISOString().split('T')[0], operatorUserId?: number): BillingRunResult {
-  return runTransaction<BillingRunResult>(() => {
-    // 1. Fetch eligible active subscriptions
-    const subscriptions = queryAll<{
-      id: number;
-      subscription_number: string;
-      customer_id: number;
-      plan_id: number;
-      status: string;
-      start_date: string;
-      expiry_date: string | null;
-      next_billing_date: string;
-      payment_terms: string;
-      discount_rule_id: number | null;
-      plan_name: string;
-      billing_interval: 'daily' | 'weekly' | 'monthly' | 'yearly';
-      auto_close: number;
-      plan_price: number;
-    }>(`
-      SELECT 
-        s.id, s.subscription_number, s.customer_id, s.plan_id, s.status,
-        s.start_date, s.expiry_date, s.next_billing_date, s.payment_terms, s.discount_rule_id,
-        p.name as plan_name, p.billing_interval, p.auto_close, p.price as plan_price
-      FROM subscriptions s
-      JOIN plans p ON s.plan_id = p.id
-      WHERE s.status = 'Active'
-        AND s.next_billing_date <= ?
-      ORDER BY s.id ASC
-    `, [asOfDate]);
+interface DueSubscription {
+  id: number;
+  subscription_number: string;
+  customer_id: number;
+  discount_rule_id: number | null;
+  payment_terms: string;
+  start_date: string;
+  expiry_date: string | null;
+  billing_interval: BillingInterval;
+}
 
+interface CursorRow {
+  status: string;
+  next_period_index: number;
+}
+
+class DryRunRollback extends Error {
+  constructor(public result: BillingRunResult) {
+    super('dry-run rollback');
+  }
+}
+
+/**
+ * Bills every Active subscription whose billing cursor is due as of `asOfDate`.
+ *
+ * Guarantees:
+ *  - exactly-once per (subscription, period): UNIQUE(subscription_id, period_start) and
+ *    UNIQUE(subscription_id, period_index) in the schema are the final authority;
+ *  - no skipped periods: each subscription is advanced one period at a time until the cursor is
+ *    past `asOfDate` (catch-up), never jumping to the latest period;
+ *  - atomic per subscription: all periods of one subscription commit or roll back together, and a
+ *    failing subscription never blocks or undoes the others;
+ *  - safe under concurrency: each subscription is processed in a BEGIN IMMEDIATE transaction that
+ *    re-reads the cursor after taking the write lock, so a second runner sees the first one's work.
+ */
+export function runBillingCycle(
+  asOfDate: string = todayIso(),
+  operatorOrOptions?: number | BillingRunOptions
+): BillingRunResult {
+  const opts: BillingRunOptions =
+    typeof operatorOrOptions === 'number' ? { operatorUserId: operatorOrOptions } : operatorOrOptions ?? {};
+
+  const exec = (): BillingRunResult => {
     const result: BillingRunResult = {
       asOfDate,
-      processedCount: subscriptions.length,
+      dryRun: !!opts.dryRun,
+      processedCount: 0,
       invoicesCreated: 0,
       skippedDuplicates: 0,
+      errors: 0,
       totalBilledAmount: 0,
       invoiceIds: [],
       details: []
     };
+    let totalCents = 0;
 
-    for (const sub of subscriptions) {
-      // Check if auto_close applies
-      if (sub.auto_close === 1 && sub.expiry_date && asOfDate >= sub.expiry_date) {
-        execute("UPDATE subscriptions SET status = 'Closed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [sub.id]);
+    const taxes = TaxTable.load();
+
+    const due = queryAll<DueSubscription>(
+      `SELECT s.id, s.subscription_number, s.customer_id, s.discount_rule_id, s.payment_terms,
+              s.start_date, s.expiry_date, p.billing_interval
+       FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+       WHERE s.status = 'Active' AND s.next_billing_date <= ?
+       ORDER BY s.id`,
+      [asOfDate]
+    );
+    result.processedCount = due.length;
+
+    for (const sub of due) {
+      // Counters are collected per subscription and merged only after its transaction commits,
+      // so a rolled-back subscription never leaks into the run totals.
+      const local: BillingRunResult = { ...result, invoicesCreated: 0, skippedDuplicates: 0, invoiceIds: [], details: [] };
+      try {
+        const cents = runTransaction(() => billSubscription(sub, asOfDate, taxes, opts, local));
+        totalCents += cents;
+        result.invoicesCreated += local.invoicesCreated;
+        result.skippedDuplicates += local.skippedDuplicates;
+        result.invoiceIds.push(...local.invoiceIds);
+        result.details.push(...local.details);
+      } catch (err) {
+        result.errors++;
         result.details.push({
           subscriptionNumber: sub.subscription_number,
-          status: 'auto_closed',
-          reason: `Auto-closed as plan ended on ${sub.expiry_date}`
+          status: 'error',
+          reason: err instanceof Error ? err.message : 'Unknown billing error'
         });
-        continue;
       }
+    }
 
-      const periodStart = sub.next_billing_date;
-      const periodEnd = computeNextDate(periodStart, sub.billing_interval);
+    autoCloseExpired(asOfDate, opts.operatorUserId, result);
 
-      // Check for existing invoice for this period - The Idempotency Check
-      const existing = queryOne<{ id: number; invoice_number: string }>(
-        'SELECT id, invoice_number FROM invoices WHERE subscription_id = ? AND period_start = ?',
-        [sub.id, periodStart]
+    result.totalBilledAmount = fromCents(totalCents);
+
+    if (!opts.dryRun) {
+      audit(
+        'BILLING_RUN',
+        `Billing run as of ${asOfDate}: ${result.invoicesCreated} invoices created, ${result.skippedDuplicates} already billed, ${result.errors} errors.`,
+        opts.operatorUserId,
+        { ...result, details: undefined, invoiceIds: undefined }
       );
+    }
+    return result;
+  };
 
-      if (existing) {
-        result.skippedDuplicates++;
-        result.details.push({
-          subscriptionNumber: sub.subscription_number,
-          invoiceNumber: existing.invoice_number,
-          status: 'already_billed',
-          reason: `Invoice #${existing.invoice_number} already generated for period ${periodStart}`
-        });
-        continue;
-      }
+  if (!opts.dryRun) return exec();
 
-      // Fetch subscription lines
-      const lines = queryAll<{
-        id: number;
-        product_id: number;
-        variant_id: number | null;
-        quantity: number;
-        unit_price: number;
-        tax_id: number | null;
-        product_name: string;
-        attribute_name: string | null;
-        option_name: string | null;
-        price_extra: number | null;
-      }>(`
-        SELECT 
-          sl.id, sl.product_id, sl.variant_id, sl.quantity, sl.unit_price, sl.tax_id,
-          p.name as product_name,
-          pv.attribute_name, pv.option_name, pv.price_extra
-        FROM subscription_lines sl
-        JOIN products p ON sl.product_id = p.id
-        LEFT JOIN product_variants pv ON sl.variant_id = pv.id
-        WHERE sl.subscription_id = ?
-      `, [sub.id]);
+  try {
+    runTransaction(() => {
+      throw new DryRunRollback(exec());
+    });
+  } catch (err) {
+    if (err instanceof DryRunRollback) return err.result;
+    throw err;
+  }
+  throw new Error('unreachable');
+}
 
-      let subtotal = 0;
-      let totalTax = 0;
-      let totalQty = 0;
+/** Bills all due periods of one subscription. Must run inside a transaction. Returns billed cents. */
+function billSubscription(
+  sub: DueSubscription,
+  asOfDate: string,
+  taxes: TaxTable,
+  opts: BillingRunOptions,
+  result: BillingRunResult
+): number {
+  // Re-read the cursor under the write lock: another runner may have billed this subscription already.
+  const cursor = queryOne<CursorRow>('SELECT status, next_period_index FROM subscriptions WHERE id = ?', [sub.id]);
+  if (!cursor || cursor.status !== 'Active') return 0;
 
-      const productLineEvaluations: Array<{ productId: number; quantity: number; lineTotal: number }> = [];
+  const lineRows = queryAll<{
+    product_id: number; variant_id: number | null; quantity: number; unit_price: number; tax_id: number | null;
+    product_name: string; attribute_name: string | null; option_name: string | null;
+  }>(
+    `SELECT sl.product_id, sl.variant_id, sl.quantity, sl.unit_price, sl.tax_id, p.name AS product_name,
+            pv.attribute_name, pv.option_name
+     FROM subscription_lines sl
+     JOIN products p ON p.id = sl.product_id
+     LEFT JOIN product_variants pv ON pv.id = sl.variant_id
+     WHERE sl.subscription_id = ? ORDER BY sl.id`,
+    [sub.id]
+  );
+  if (lineRows.length === 0) throw new Error('Subscription has no lines to bill');
 
-      for (const line of lines) {
-        const effectiveUnitPrice = line.unit_price;
-        const lineBase = effectiveUnitPrice * line.quantity;
-        subtotal += lineBase;
-        totalQty += line.quantity;
-        productLineEvaluations.push({
-          productId: line.product_id,
-          quantity: line.quantity,
-          lineTotal: lineBase
-        });
+  const termDays = paymentTermDays(sub.payment_terms);
+  const year = asOfDate.slice(0, 4);
+  let idx = cursor.next_period_index;
+  let billedCents = 0;
+  let periodsThisRun = 0;
+  let discountRuleId = sub.discount_rule_id;
 
-        const taxResult = calculateTax(lineBase, line.tax_id);
-        totalTax += taxResult.taxAmount;
-      }
+  for (; periodsThisRun < MAX_PERIODS_PER_SUBSCRIPTION_PER_RUN; periodsThisRun++, idx++) {
+    const start = periodStart(sub.start_date, sub.billing_interval, idx);
+    if (start > asOfDate) break;
+    if (sub.expiry_date && start >= sub.expiry_date) break; // term ended: nothing left to bill
+    const end = periodStart(sub.start_date, sub.billing_interval, idx + 1);
 
-      // Evaluate discount
-      const discountRes = evaluateDiscount(
-        sub.discount_rule_id,
-        subtotal,
-        totalQty,
-        asOfDate,
-        productLineEvaluations
-      );
-
-      const discountAmount = discountRes.applicable ? discountRes.discountAmount : 0;
-      const netTaxable = Math.max(0, subtotal - discountAmount);
-      // Recalculate tax proportionally if discount is applied at whole subscription level
-      const finalTax = Number((totalTax * (subtotal > 0 ? (netTaxable / subtotal) : 1)).toFixed(2));
-      const totalAmount = Number((netTaxable + finalTax).toFixed(2));
-
-      // Generate invoice number e.g. INV-2026-XXXX
-      const invCount = queryOne<{ count: number }>('SELECT COUNT(*) as count FROM invoices');
-      const invoiceNumber = `INV-${new Date().getFullYear()}-${String((invCount?.count || 0) + 1).padStart(5, '0')}`;
-      const dueDate = computeNextDate(asOfDate, 'monthly'); // standard 30 day due date
-
-      // Insert invoice
-      const invInsert = execute(`
-        INSERT INTO invoices (
-          invoice_number, subscription_id, customer_id, period_start, period_end,
-          subtotal, tax_amount, discount_amount, total_amount, amount_paid,
-          status, issue_date, due_date
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Confirmed', ?, ?)
-      `, [
-        invoiceNumber, sub.id, sub.customer_id, periodStart, periodEnd,
-        subtotal, finalTax, discountAmount, totalAmount,
-        asOfDate, dueDate
-      ]);
-
-      const invoiceId = Number(invInsert.lastInsertRowid);
-
-      // Insert invoice lines
-      for (const line of lines) {
-        const lineBase = line.unit_price * line.quantity;
-        const lineTax = calculateTax(lineBase, line.tax_id).taxAmount;
-        const variantDesc = line.option_name ? ` (${line.attribute_name}: ${line.option_name})` : '';
-        const description = `${line.product_name}${variantDesc} [${periodStart} to ${periodEnd}]`;
-
-        execute(`
-          INSERT INTO invoice_lines (
-            invoice_id, product_id, variant_id, description,
-            quantity, unit_price, tax_amount, discount_amount, line_total
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
-        `, [
-          invoiceId, line.product_id, line.variant_id, description,
-          line.quantity, line.unit_price, lineTax, lineBase
-        ]);
-      }
-
-      // Advance subscription next_billing_date
-      const newNextBillingDate = periodEnd;
-      execute(
-        'UPDATE subscriptions SET next_billing_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        [newNextBillingDate, sub.id]
-      );
-
-      // Record discount usage if applied
-      if (discountRes.applicable && sub.discount_rule_id) {
-        recordDiscountUsage(sub.discount_rule_id);
-
-        // Check if discount rule has reached its usage cap or expired
-        const updatedRule = queryOne<{ current_uses: number; max_uses: number; end_date: string | null; code: string }>(
-          'SELECT current_uses, max_uses, end_date, code FROM discount_rules WHERE id = ?',
-          [sub.discount_rule_id]
-        );
-
-        if (updatedRule) {
-          const usageExceeded = updatedRule.max_uses > 0 && updatedRule.current_uses >= updatedRule.max_uses;
-          const dateExpired = updatedRule.end_date && asOfDate >= updatedRule.end_date;
-
-          if (usageExceeded || dateExpired) {
-            // Automatically detach from subscription so future cycles stop applying it without manual work
-            execute('UPDATE subscriptions SET discount_rule_id = NULL WHERE id = ?', [sub.id]);
-            execute(
-              'INSERT INTO audit_logs (event_type, description, user_id, metadata_json) VALUES (?, ?, ?, ?)',
-              [
-                'DISCOUNT_AUTO_EXPIRED',
-                `Discount '${updatedRule.code}' reached ${usageExceeded ? 'usage limit' : 'end date'} and was automatically detached from Subscription ${sub.subscription_number}`,
-                operatorUserId || null,
-                JSON.stringify({ subscriptionId: sub.id, ruleId: sub.discount_rule_id, code: updatedRule.code })
-              ]
-            );
-          }
-        }
-      }
-
-      result.invoicesCreated++;
-      result.totalBilledAmount += totalAmount;
-      result.invoiceIds.push(invoiceId);
+    const existing = queryOne<{ invoice_number: string }>(
+      'SELECT invoice_number FROM invoices WHERE subscription_id = ? AND period_start = ?',
+      [sub.id, start]
+    );
+    if (existing) {
+      result.skippedDuplicates++;
       result.details.push({
         subscriptionNumber: sub.subscription_number,
-        invoiceNumber,
-        amount: totalAmount,
-        status: 'created'
+        invoiceNumber: existing.invoice_number,
+        periodStart: start,
+        status: 'already_billed',
+        reason: `Period ${start} already invoiced as ${existing.invoice_number}`
       });
+      continue;
     }
 
-    result.totalBilledAmount = Number(result.totalBilledAmount.toFixed(2));
+    const billable: BillableLine[] = lineRows.map(l => ({
+      productId: l.product_id,
+      variantId: l.variant_id,
+      description: `${l.product_name}${l.option_name ? ` (${l.attribute_name}: ${l.option_name})` : ''} [${start} to ${end}]`,
+      quantity: l.quantity,
+      unitPriceCents: toCents(l.unit_price),
+      taxId: l.tax_id
+    }));
 
-    // Audit log
-    let validUserId: number | null = null;
-    if (operatorUserId) {
-      const u = queryOne('SELECT id FROM users WHERE id = ?', [operatorUserId]);
-      if (u) validUserId = operatorUserId;
+    // Discount validity is judged at the period's own start date, so a catch-up run produces the same
+    // invoices an on-time run would have (a discount that was valid in January still applies to January).
+    // Validate, then atomically consume a use. If the last use was just taken by
+    // someone else the claim fails and the invoice is simply issued without a discount.
+    let rule = loadDiscountRule(discountRuleId);
+    let calc = calculateInvoice(billable, taxes, rule, start);
+    let claimed = false;
+    if (calc.discount.applicable && rule) {
+      claimed = claimDiscountUse(rule.id);
+      if (!claimed) calc = calculateInvoice(billable, taxes, rule, start, false);
     }
 
-    execute(
-      'INSERT INTO audit_logs (event_type, description, user_id, metadata_json) VALUES (?, ?, ?, ?)',
+    const invoiceNumber = `INV-${year}-${String(nextSequence('invoice')).padStart(6, '0')}`;
+    const ins = execute(
+      `INSERT INTO invoices (
+         invoice_number, subscription_id, customer_id, period_index, period_start, period_end,
+         subtotal, tax_amount, discount_amount, total_amount, amount_paid, status, issue_date, due_date
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       [
-        'BILLING_RUN',
-        `Billing run executed as of ${asOfDate}. Created ${result.invoicesCreated} invoices, skipped ${result.skippedDuplicates} duplicates.`,
-        validUserId,
-        JSON.stringify(result)
+        invoiceNumber, sub.id, sub.customer_id, idx, start, end,
+        fromCents(calc.subtotalCents), fromCents(calc.taxCents), fromCents(calc.discountCents), fromCents(calc.totalCents),
+        opts.autoConfirm ? 'Confirmed' : 'Draft', asOfDate, addDays(asOfDate, termDays)
       ]
     );
+    const invoiceId = Number(ins.lastInsertRowid);
 
-    return result;
-  });
+    for (const l of calc.lines) {
+      execute(
+        `INSERT INTO invoice_lines (
+           invoice_id, kind, product_id, variant_id, description, quantity, unit_price,
+           gross_amount, discount_amount, net_amount, tax_name, tax_rate, tax_amount, line_total
+         ) VALUES (?, 'PRODUCT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          invoiceId, l.productId, l.variantId, l.description, l.quantity, fromCents(l.unitPriceCents),
+          fromCents(l.grossCents), fromCents(l.discountCents), fromCents(l.netCents),
+          l.taxName, l.taxRate, fromCents(l.taxCents), fromCents(l.totalCents)
+        ]
+      );
+    }
+
+    if (claimed && rule) {
+      execute(
+        'INSERT INTO invoice_discounts (invoice_id, discount_rule_id, code, applies_to, amount) VALUES (?, ?, ?, ?, ?)',
+        [invoiceId, rule.id, rule.code, rule.applies_to, fromCents(calc.discountCents)]
+      );
+      const after = queryOne<{ current_uses: number; max_uses: number }>(
+        'SELECT current_uses, max_uses FROM discount_rules WHERE id = ?', [rule.id]
+      )!;
+      const exhausted = after.max_uses > 0 && after.current_uses >= after.max_uses;
+      const expired = !!rule.end_date && end > rule.end_date; // the next period would start after the end date
+      if (exhausted || expired) {
+        // Stop applying it from the next invoice on, without anyone having to remember.
+        execute('UPDATE subscriptions SET discount_rule_id = NULL WHERE id = ?', [sub.id]);
+        discountRuleId = null;
+        audit(
+          'DISCOUNT_AUTO_EXPIRED',
+          `Discount '${rule.code}' ${exhausted ? 'reached its usage limit' : 'reached its end date'} and was detached from ${sub.subscription_number}`,
+          opts.operatorUserId,
+          { subscriptionId: sub.id, ruleId: rule.id },
+          { subscriptionId: sub.id }
+        );
+      }
+    }
+
+    billedCents += calc.totalCents;
+    result.invoicesCreated++;
+    result.invoiceIds.push(invoiceId);
+    result.details.push({
+      subscriptionNumber: sub.subscription_number,
+      invoiceNumber,
+      periodStart: start,
+      amount: fromCents(calc.totalCents),
+      status: 'created'
+    });
+  }
+
+  // Advance the cursor once, after every period up to `asOfDate` has an invoice.
+  const nextStart = periodStart(sub.start_date, sub.billing_interval, idx);
+  execute(
+    'UPDATE subscriptions SET next_period_index = ?, next_billing_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [idx, nextStart, sub.id]
+  );
+
+  if (periodsThisRun >= MAX_PERIODS_PER_SUBSCRIPTION_PER_RUN && nextStart <= asOfDate) {
+    result.details.push({
+      subscriptionNumber: sub.subscription_number,
+      status: 'error',
+      reason: `Catch-up limit of ${MAX_PERIODS_PER_SUBSCRIPTION_PER_RUN} periods reached; run billing again to continue`
+    });
+  }
+  return billedCents;
+}
+
+/**
+ * Plans with auto_close close their subscriptions by themselves once the term has ended and every
+ * period that started before expiry has been billed.
+ */
+function autoCloseExpired(asOfDate: string, operatorUserId: number | undefined, result: BillingRunResult): void {
+  const rows = queryAll<{ id: number; subscription_number: string; expiry_date: string; status: string }>(
+    `SELECT s.id, s.subscription_number, s.expiry_date, s.status
+     FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+     WHERE s.status IN ('Active', 'Paused') AND p.auto_close = 1
+       AND s.expiry_date IS NOT NULL AND s.expiry_date <= ? AND s.next_billing_date >= s.expiry_date`,
+    [asOfDate]
+  );
+  for (const r of rows) {
+    runTransaction(() => {
+      execute(
+        "UPDATE subscriptions SET status = 'Closed', closed_on = ?, close_reason = 'EXPIRED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [asOfDate, r.id]
+      );
+      audit(
+        'SUBSCRIPTION_TRANSITION',
+        `Subscription ${r.subscription_number} auto-closed: plan term ended ${r.expiry_date}`,
+        operatorUserId,
+        { subscriptionId: r.id, from: r.status, to: 'Closed', auto: true },
+        { subscriptionId: r.id }
+      );
+    });
+    result.details.push({
+      subscriptionNumber: r.subscription_number,
+      status: 'auto_closed',
+      reason: `Auto-closed as plan ended on ${r.expiry_date}`
+    });
+  }
 }

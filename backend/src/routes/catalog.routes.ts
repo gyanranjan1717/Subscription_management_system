@@ -1,238 +1,221 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
 import { queryAll, queryOne, execute, runTransaction } from '../db/database.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
+import { audit } from '../services/audit.js';
+import { badRequest, handle, isUniqueViolation, conflict, notFound } from '../lib/errors.js';
+import { fromCents } from '../lib/money.js';
+import { Body, asBody, bool, date, idParam, int, money, oneOf, percent, reqStr, str } from '../lib/validation.js';
 
 export const catalogRouter = Router();
+catalogRouter.use(authenticate);
 
-// ============================================================================
-// PRODUCTS & VARIANTS
-// ============================================================================
+// Catalog data is internal: customers never read it (and never see cost prices).
+const staffRead = requireRole('admin', 'staff');
+const adminWrite = requireRole('admin');
 
-catalogRouter.get('/products', authenticate, (req: Request, res: Response): void => {
-  const products = queryAll(`
-    SELECT * FROM products WHERE is_active = 1 ORDER BY name ASC
-  `);
+const PRODUCT_TYPES = ['service', 'software', 'addon', 'consumable'] as const;
+const INTERVALS = ['daily', 'weekly', 'monthly', 'yearly'] as const;
+const DISCOUNT_TYPES = ['fixed', 'percentage'] as const;
+const DISCOUNT_SCOPES = ['all', 'product', 'subscription'] as const;
 
-  const variants = queryAll(`
-    SELECT * FROM product_variants ORDER BY id ASC
-  `);
+// ---- Products & variants ----------------------------------------------------------------------
 
-  const productsWithVariants = products.map(p => ({
-    ...p,
-    variants: variants.filter(v => v.product_id === p.id)
-  }));
-
-  res.json({ success: true, products: productsWithVariants });
-});
-
-catalogRouter.post('/products', authenticate, requireRole('admin'), (req: Request, res: Response): void => {
-  try {
-    const { name, type, sales_price, cost_price, notes, variants } = req.body;
-    if (!name || !type || sales_price === undefined || cost_price === undefined) {
-      res.status(400).json({ success: false, error: 'Name, type, sales_price, and cost_price are required.' });
-      return;
-    }
-
-    const result = runTransaction(() => {
-      const ins = execute(`
-        INSERT INTO products (name, type, sales_price, cost_price, notes)
-        VALUES (?, ?, ?, ?, ?)
-      `, [name, type, sales_price, cost_price, notes || null]);
-
-      const productId = Number(ins.lastInsertRowid);
-
-      if (Array.isArray(variants)) {
-        for (const v of variants) {
-          if (v.attribute_name && v.option_name) {
-            execute(`
-              INSERT INTO product_variants (product_id, attribute_name, option_name, price_extra)
-              VALUES (?, ?, ?, ?)
-            `, [productId, v.attribute_name, v.option_name, v.price_extra || 0]);
-          }
-        }
-      }
-      return productId;
-    });
-
-    res.status(201).json({ success: true, productId: result, message: 'Product created successfully' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+catalogRouter.get('/products', staffRead, handle((req, res) => {
+  const isAdmin = req.user!.role === 'admin';
+  const products = queryAll<Record<string, any>>('SELECT * FROM products WHERE is_active = 1 ORDER BY name');
+  const variants = queryAll<Record<string, any>>(
+    'SELECT * FROM product_variants WHERE product_id IN (SELECT id FROM products WHERE is_active = 1) ORDER BY id'
+  );
+  const byProduct = new Map<number, Record<string, any>[]>();
+  for (const v of variants) {
+    const list = byProduct.get(v.product_id) ?? [];
+    list.push(v);
+    byProduct.set(v.product_id, list);
   }
-});
+  res.json({
+    success: true,
+    products: products.map(({ cost_price, ...p }) => ({ ...p, ...(isAdmin ? { cost_price } : {}), variants: byProduct.get(p.id) ?? [] }))
+  });
+}));
 
-// ============================================================================
-// PLANS
-// ============================================================================
-
-catalogRouter.get('/plans', authenticate, (req: Request, res: Response): void => {
-  const plans = queryAll('SELECT * FROM plans WHERE is_active = 1 ORDER BY name ASC');
-  res.json({ success: true, plans });
-});
-
-catalogRouter.post('/plans', authenticate, requireRole('admin'), (req: Request, res: Response): void => {
+function insertVariant(productId: number, v: Body): void {
   try {
-    const { name, billing_interval, price, min_quantity, start_date, end_date, auto_close, can_pause, can_renew } = req.body;
-    if (!name || !billing_interval || price === undefined) {
-      res.status(400).json({ success: false, error: 'Name, billing_interval, and price are required.' });
-      return;
-    }
-
-    const ins = execute(`
-      INSERT INTO plans (
-        name, billing_interval, price, min_quantity, start_date, end_date,
-        auto_close, can_pause, can_renew
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      name, billing_interval, price, min_quantity || 1, start_date || null, end_date || null,
-      auto_close ? 1 : 0, can_pause !== undefined ? (can_pause ? 1 : 0) : 1, can_renew !== undefined ? (can_renew ? 1 : 0) : 1
-    ]);
-
-    res.status(201).json({ success: true, planId: Number(ins.lastInsertRowid), message: 'Plan created successfully' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    execute(
+      'INSERT INTO product_variants (product_id, attribute_name, option_name, price_extra) VALUES (?, ?, ?, ?)',
+      [productId, reqStr(v, 'attribute_name', 80), reqStr(v, 'option_name', 80), fromCents(money(v, 'price_extra'))]
+    );
+  } catch (err) {
+    if (isUniqueViolation(err)) throw conflict('This variant already exists for the product.');
+    throw err;
   }
-});
+}
 
-// ============================================================================
-// TAX RULES
-// ============================================================================
+catalogRouter.post('/products', adminWrite, handle((req, res) => {
+  const b = asBody(req.body);
+  const name = reqStr(b, 'name', 160);
+  const type = oneOf(b, 'type', PRODUCT_TYPES);
+  const sales = money(b, 'sales_price', { required: true });
+  const cost = money(b, 'cost_price', { required: true });
+  const notes = str(b, 'notes', { max: 1000 });
+  const variants = Array.isArray(b.variants) ? (b.variants as unknown[]).map(asBody) : [];
 
-catalogRouter.get('/taxes', authenticate, (req: Request, res: Response): void => {
-  const taxes = queryAll('SELECT * FROM tax_rules WHERE is_active = 1 ORDER BY id ASC');
-  res.json({ success: true, taxes });
-});
+  const productId = runTransaction(() => {
+    const ins = execute(
+      'INSERT INTO products (name, type, sales_price, cost_price, notes) VALUES (?, ?, ?, ?, ?)',
+      [name, type, fromCents(sales), fromCents(cost), notes]
+    );
+    const id = Number(ins.lastInsertRowid);
+    for (const v of variants) insertVariant(id, v);
+    return id;
+  });
+  res.status(201).json({ success: true, productId, message: 'Product created successfully' });
+}));
 
-catalogRouter.post('/taxes', authenticate, requireRole('admin'), (req: Request, res: Response): void => {
-  try {
-    const { name, rate_percentage, is_default } = req.body;
-    if (!name || rate_percentage === undefined) {
-      res.status(400).json({ success: false, error: 'Name and rate_percentage are required.' });
-      return;
-    }
+catalogRouter.post('/products/:id/variants', adminWrite, handle((req, res) => {
+  const productId = idParam(req.params.id);
+  if (!queryOne('SELECT id FROM products WHERE id = ?', [productId])) throw notFound('Product not found.');
+  insertVariant(productId, asBody(req.body));
+  res.status(201).json({ success: true, message: 'Variant created successfully' });
+}));
 
-    runTransaction(() => {
-      if (is_default) {
-        execute('UPDATE tax_rules SET is_default = 0');
-      }
-      execute(`
-        INSERT INTO tax_rules (name, rate_percentage, is_default)
-        VALUES (?, ?, ?)
-      `, [name, rate_percentage, is_default ? 1 : 0]);
-    });
+// ---- Plans ------------------------------------------------------------------------------------
 
-    res.status(201).json({ success: true, message: 'Tax rule created successfully' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+catalogRouter.get('/plans', staffRead, handle((_req, res) => {
+  res.json({ success: true, plans: queryAll('SELECT * FROM plans WHERE is_active = 1 ORDER BY name') });
+}));
 
-// ============================================================================
-// DISCOUNT RULES (Admin-only creation)
-// ============================================================================
+catalogRouter.post('/plans', adminWrite, handle((req, res) => {
+  const b = asBody(req.body);
+  const start = date(b, 'start_date');
+  const end = date(b, 'end_date');
+  if (start && end && end < start) throw badRequest('end_date cannot be before start_date.');
 
-catalogRouter.get('/discounts', authenticate, (req: Request, res: Response): void => {
-  const discounts = queryAll(`
-    SELECT dr.*, p.name as target_product_name
-    FROM discount_rules dr
-    LEFT JOIN products p ON dr.target_product_id = p.id
-    WHERE dr.is_active = 1
-    ORDER BY dr.id DESC
-  `);
+  const ins = execute(
+    `INSERT INTO plans (name, billing_interval, price, min_quantity, start_date, end_date,
+                        auto_close, can_close_early, can_pause, can_renew)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      reqStr(b, 'name', 160), oneOf(b, 'billing_interval', INTERVALS), fromCents(money(b, 'price', { required: true })),
+      int(b, 'min_quantity', { min: 1, max: 100000, def: 1 }), start, end,
+      bool(b, 'auto_close', false) ? 1 : 0, bool(b, 'can_close_early', true) ? 1 : 0,
+      bool(b, 'can_pause', true) ? 1 : 0, bool(b, 'can_renew', true) ? 1 : 0
+    ]
+  );
+  res.status(201).json({ success: true, planId: Number(ins.lastInsertRowid), message: 'Plan created successfully' });
+}));
+
+// ---- Tax rules --------------------------------------------------------------------------------
+
+catalogRouter.get('/taxes', staffRead, handle((_req, res) => {
+  res.json({ success: true, taxes: queryAll('SELECT * FROM tax_rules WHERE is_active = 1 ORDER BY id') });
+}));
+
+catalogRouter.post('/taxes', adminWrite, handle((req, res) => {
+  const b = asBody(req.body);
+  const name = reqStr(b, 'name', 120);
+  const rate = percent(b, 'rate_percentage', { required: true });
+  const isDefault = bool(b, 'is_default', false);
+  runTransaction(() => {
+    if (isDefault) execute('UPDATE tax_rules SET is_default = 0');
+    execute('INSERT INTO tax_rules (name, rate_percentage, is_default) VALUES (?, ?, ?)', [name, rate, isDefault ? 1 : 0]);
+  });
+  res.status(201).json({ success: true, message: 'Tax rule created successfully' });
+}));
+
+// ---- Discount rules (admin-only creation) -----------------------------------------------------
+
+catalogRouter.get('/discounts', staffRead, handle((_req, res) => {
+  const discounts = queryAll(
+    `SELECT dr.*, p.name AS target_product_name
+     FROM discount_rules dr LEFT JOIN products p ON p.id = dr.target_product_id
+     WHERE dr.is_active = 1 ORDER BY dr.id DESC`
+  );
   res.json({ success: true, discounts });
-});
+}));
 
-catalogRouter.post('/discounts', authenticate, requireRole('admin'), (req: Request, res: Response): void => {
-  try {
-    const {
-      code, description, discount_type, value, min_amount, min_quantity,
-      start_date, end_date, max_uses, applies_to, target_product_id
-    } = req.body;
-
-    if (!code || !description || !discount_type || value === undefined) {
-      res.status(400).json({ success: false, error: 'Code, description, discount_type, and value are required.' });
-      return;
-    }
-
-    const ins = execute(`
-      INSERT INTO discount_rules (
-        code, description, discount_type, value, min_amount, min_quantity,
-        start_date, end_date, max_uses, current_uses, applies_to, target_product_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-    `, [
-      code.toUpperCase().trim(), description, discount_type, value,
-      min_amount || 0, min_quantity || 0, start_date || null, end_date || null,
-      max_uses || 0, applies_to || 'all', target_product_id || null
-    ]);
-
-    res.status(201).json({
-      success: true,
-      discountId: Number(ins.lastInsertRowid),
-      message: 'Discount rule created successfully'
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+catalogRouter.post('/discounts', adminWrite, handle((req, res) => {
+  const b = asBody(req.body);
+  const type = oneOf(b, 'discount_type', DISCOUNT_TYPES);
+  const appliesTo = oneOf(b, 'applies_to', DISCOUNT_SCOPES, { def: 'all' });
+  const valueCents = money(b, 'value', { required: true, positive: true });
+  if (type === 'percentage' && valueCents > 10000) throw badRequest('A percentage discount cannot exceed 100.');
+  const start = date(b, 'start_date');
+  const end = date(b, 'end_date');
+  if (start && end && end < start) throw badRequest('end_date cannot be before start_date.');
+  const targetProductId = b.target_product_id ? int(b, 'target_product_id', { min: 1 }) : null;
+  if (appliesTo === 'product') {
+    if (!targetProductId) throw badRequest('target_product_id is required for product-scoped discounts.');
+    if (!queryOne('SELECT id FROM products WHERE id = ?', [targetProductId])) throw badRequest('target_product_id does not exist.');
   }
-});
 
-// ============================================================================
-// QUOTATION TEMPLATES
-// ============================================================================
-
-catalogRouter.get('/quotation-templates', authenticate, (req: Request, res: Response): void => {
-  const templates = queryAll(`
-    SELECT qt.*, p.name as plan_name, p.billing_interval, p.price as plan_price
-    FROM quotation_templates qt
-    JOIN plans p ON qt.plan_id = p.id
-    WHERE qt.is_active = 1
-    ORDER BY qt.id DESC
-  `);
-
-  const lines = queryAll(`
-    SELECT 
-      qtl.*, p.name as product_name, p.sales_price,
-      pv.attribute_name, pv.option_name, pv.price_extra
-    FROM quotation_template_lines qtl
-    JOIN products p ON qtl.product_id = p.id
-    LEFT JOIN product_variants pv ON qtl.variant_id = pv.id
-  `);
-
-  const enriched = templates.map(t => ({
-    ...t,
-    lines: lines.filter(l => l.template_id === t.id)
-  }));
-
-  res.json({ success: true, templates: enriched });
-});
-
-catalogRouter.post('/quotation-templates', authenticate, requireRole('admin', 'staff'), (req: Request, res: Response): void => {
   try {
-    const { name, plan_id, validity_days, notes, lines } = req.body;
-    if (!name || !plan_id) {
-      res.status(400).json({ success: false, error: 'Template name and plan_id are required.' });
-      return;
-    }
+    const ins = execute(
+      `INSERT INTO discount_rules (code, description, discount_type, value, min_amount, min_quantity,
+                                   start_date, end_date, max_uses, applies_to, target_product_id, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        reqStr(b, 'code', 40).toUpperCase(), reqStr(b, 'description', 200), type, fromCents(valueCents),
+        fromCents(money(b, 'min_amount')), int(b, 'min_quantity', { min: 0, def: 0 }), start, end,
+        int(b, 'max_uses', { min: 0, def: 0 }), appliesTo, appliesTo === 'product' ? targetProductId : null, req.user!.id
+      ]
+    );
+    audit('DISCOUNT_CREATED', 'Discount rule created', req.user!.id, { discountId: Number(ins.lastInsertRowid) });
+    res.status(201).json({ success: true, discountId: Number(ins.lastInsertRowid), message: 'Discount rule created successfully' });
+  } catch (err) {
+    if (isUniqueViolation(err)) throw conflict('A discount with this code already exists.');
+    throw err;
+  }
+}));
 
-    const templateId = runTransaction(() => {
-      const ins = execute(`
-        INSERT INTO quotation_templates (name, plan_id, validity_days, notes)
-        VALUES (?, ?, ?, ?)
-      `, [name, plan_id, validity_days || 30, notes || null]);
+// ---- Quotation templates ----------------------------------------------------------------------
 
-      const tId = Number(ins.lastInsertRowid);
+catalogRouter.get('/quotation-templates', staffRead, handle((_req, res) => {
+  const templates = queryAll<Record<string, any>>(
+    `SELECT qt.*, p.name AS plan_name, p.billing_interval, p.price AS plan_price
+     FROM quotation_templates qt JOIN plans p ON p.id = qt.plan_id
+     WHERE qt.is_active = 1 ORDER BY qt.id DESC`
+  );
+  const lines = queryAll<Record<string, any>>(
+    `SELECT qtl.*, p.name AS product_name, p.sales_price, pv.attribute_name, pv.option_name, pv.price_extra
+     FROM quotation_template_lines qtl
+     JOIN products p ON p.id = qtl.product_id
+     LEFT JOIN product_variants pv ON pv.id = qtl.variant_id
+     WHERE qtl.template_id IN (SELECT id FROM quotation_templates WHERE is_active = 1)`
+  );
+  const byTemplate = new Map<number, Record<string, any>[]>();
+  for (const l of lines) {
+    const list = byTemplate.get(l.template_id) ?? [];
+    list.push(l);
+    byTemplate.set(l.template_id, list);
+  }
+  res.json({ success: true, templates: templates.map(t => ({ ...t, lines: byTemplate.get(t.id) ?? [] })) });
+}));
 
-      if (Array.isArray(lines)) {
-        for (const line of lines) {
-          execute(`
-            INSERT INTO quotation_template_lines (template_id, product_id, variant_id, default_quantity)
-            VALUES (?, ?, ?, ?)
-          `, [tId, line.product_id, line.variant_id || null, line.default_quantity || 1]);
-        }
+catalogRouter.post('/quotation-templates', adminWrite, handle((req, res) => {
+  const b = asBody(req.body);
+  const planId = int(b, 'plan_id', { required: true, min: 1 });
+  if (!queryOne('SELECT id FROM plans WHERE id = ? AND is_active = 1', [planId])) throw badRequest('plan_id does not exist.');
+  const lines = Array.isArray(b.lines) ? (b.lines as unknown[]).map(asBody) : [];
+
+  const templateId = runTransaction(() => {
+    const ins = execute(
+      'INSERT INTO quotation_templates (name, plan_id, validity_days, notes) VALUES (?, ?, ?, ?)',
+      [reqStr(b, 'name', 160), planId, int(b, 'validity_days', { min: 1, max: 3650, def: 30 }), str(b, 'notes', { max: 1000 })]
+    );
+    const id = Number(ins.lastInsertRowid);
+    for (const l of lines) {
+      const productId = int(l, 'product_id', { required: true, min: 1 });
+      const variantId = l.variant_id ? int(l, 'variant_id', { min: 1 }) : null;
+      if (!queryOne('SELECT id FROM products WHERE id = ? AND is_active = 1', [productId])) throw badRequest(`Product ${productId} does not exist.`);
+      if (variantId && !queryOne('SELECT id FROM product_variants WHERE id = ? AND product_id = ?', [variantId, productId])) {
+        throw badRequest(`Variant ${variantId} does not belong to product ${productId}.`);
       }
-      return tId;
-    });
-
-    res.status(201).json({ success: true, templateId, message: 'Quotation template created successfully' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+      execute(
+        'INSERT INTO quotation_template_lines (template_id, product_id, variant_id, default_quantity) VALUES (?, ?, ?, ?)',
+        [id, productId, variantId, int(l, 'default_quantity', { min: 1, def: 1 })]
+      );
+    }
+    return id;
+  });
+  res.status(201).json({ success: true, templateId, message: 'Quotation template created successfully' });
+}));

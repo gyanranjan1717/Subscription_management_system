@@ -69,7 +69,8 @@ export function buildSubscriptionTimeline(subscriptionId: number): TimelineEvent
     `SELECT id, event_type, description, created_at, metadata_json
      FROM audit_logs
      WHERE event_type IN ('SUBSCRIPTION_TRANSITION', 'SUBSCRIPTION_RENEWED', 'INVOICE_TRANSITION')
-       AND metadata_json IS NOT NULL AND json_valid(metadata_json)`
+       AND (subscription_id = ? OR invoice_id IN (SELECT id FROM invoices WHERE subscription_id = ?))`,
+    [subscriptionId, subscriptionId]
   );
 
   const invoiceIds = new Set(invoices.map(i => i.id));
@@ -77,7 +78,7 @@ export function buildSubscriptionTimeline(subscriptionId: number): TimelineEvent
 
   for (const log of audits) {
     let meta: any;
-    try { meta = JSON.parse(log.metadata_json!); } catch { continue; }
+    try { meta = JSON.parse(log.metadata_json ?? '{}'); } catch { continue; }
 
     if (log.event_type === 'SUBSCRIPTION_TRANSITION' && meta.subscriptionId === subscriptionId) {
       events.push({

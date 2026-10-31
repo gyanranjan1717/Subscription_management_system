@@ -5,10 +5,10 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\"",
     "start": "node dist/server.js",
     "seed": "tsx src/db/seed.ts",
-    "test": "tsx tests/business_rules.test.ts"
+    "test": "node --import tsx --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
