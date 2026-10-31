@@ -1,11 +1,26 @@
 const { DatabaseSync } = require('node:sqlite');
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const fs = require('fs');
 
 const dbPath = path.resolve(__dirname, '../data/brightloop.sqlite');
+const dir = path.dirname(dbPath);
+if (!fs.existsSync(dir)) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
 const db = new DatabaseSync(dbPath);
 
 console.log('Seeding judges benchmark dataset into:', dbPath);
+
+// Ensure schema is applied if database was freshly created
+const schemaPath = path.resolve(__dirname, '../src/db/schema.sql');
+const distSchemaPath = path.resolve(__dirname, '../dist/db/schema.sql');
+if (fs.existsSync(schemaPath)) {
+  db.exec(fs.readFileSync(schemaPath, 'utf8'));
+} else if (fs.existsSync(distSchemaPath)) {
+  db.exec(fs.readFileSync(distSchemaPath, 'utf8'));
+}
 
 db.exec('PRAGMA foreign_keys = OFF;');
 
