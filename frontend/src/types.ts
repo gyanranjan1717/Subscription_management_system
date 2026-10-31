@@ -37,6 +37,7 @@ export interface Plan {
   auto_close: number;
   can_pause: number;
   can_renew: number;
+  can_close_early?: number;
   is_active: number;
 }
 
@@ -122,6 +123,7 @@ export interface Subscription {
   plan_price: number;
   can_pause: number;
   can_renew: number;
+  can_close_early?: number;
   auto_close: number;
   status: 'Draft' | 'Quotation' | 'Confirmed' | 'Active' | 'Paused' | 'Closed';
   start_date: string;
@@ -141,7 +143,11 @@ export interface Subscription {
 export interface InvoiceLine {
   id: number;
   invoice_id: number;
-  product_id: number;
+  gross_amount?: number;
+  net_amount?: number;
+  tax_name?: string;
+  tax_rate?: number;
+  product_id: number | null;
   variant_id?: number;
   description: string;
   quantity: number;
@@ -162,6 +168,7 @@ export interface Payment {
   created_at: string;
   invoice_number?: string;
   customer_name?: string;
+  invoice_total?: number;
 }
 
 export interface Invoice {
@@ -184,9 +191,11 @@ export interface Invoice {
   status: 'Draft' | 'Confirmed' | 'Paid' | 'Cancelled';
   issue_date: string;
   due_date: string;
+  balance_due?: number;
   is_overdue?: number;
   created_at: string;
   lines?: InvoiceLine[];
+  discounts?: Array<{ code: string; applies_to: string; amount: number }>;
   payments?: Payment[];
 }
 
@@ -211,6 +220,7 @@ export interface DashboardMetrics {
     overdueCount: number;
     overdueAmount: number;
   };
+  period?: { from: string | null; to: string | null; paymentsCount: number };
   performance: {
     queryExecutionTimeMs: number;
     slaMet: boolean;

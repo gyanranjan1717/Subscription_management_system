@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api.js';
+import { Alert } from '../components/ui.js';
 import { Product, Plan, TaxRule, DiscountRule, QuotationTemplate, User } from '../types.js';
 import {
   Package, Tag, Percent, Receipt, FileText, Plus,
@@ -19,6 +20,8 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
   const [discounts, setDiscounts] = useState<DiscountRule[]>([]);
   const [templates, setTemplates] = useState<QuotationTemplate[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
 
   // Creation modal states
   const [showProductModal, setShowProductModal] = useState(false);
@@ -38,6 +41,12 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
   const [newPlanInterval, setNewPlanInterval] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('monthly');
   const [newPlanPrice, setNewPlanPrice] = useState(1200);
   const [newPlanAutoClose, setNewPlanAutoClose] = useState(false);
+  const [newPlanMinQty, setNewPlanMinQty] = useState(1);
+  const [newPlanStart, setNewPlanStart] = useState('');
+  const [newPlanEnd, setNewPlanEnd] = useState('');
+  const [newPlanCanPause, setNewPlanCanPause] = useState(true);
+  const [newPlanCanRenew, setNewPlanCanRenew] = useState(true);
+  const [newPlanCanClose, setNewPlanCanClose] = useState(true);
 
   const [newTaxName, setNewTaxName] = useState('');
   const [newTaxRate, setNewTaxRate] = useState(18);
@@ -65,7 +74,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
       setDiscounts(discRes.discounts);
       setTemplates(tplRes.templates);
     } catch (err: any) {
-      alert('Error loading catalog: ' + err.message);
+      setError('Could not load the catalog: ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -77,6 +86,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
 
   const handleCreateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     try {
       await api.createProduct({
         name: newProdName,
@@ -89,25 +99,34 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
         ] : []
       });
       setShowProductModal(false);
+      setSaved('Product saved. Variants add their price extra to the product price on every new subscription line.');
       loadData();
     } catch (err: any) {
-      alert('Failed: ' + err.message);
+      setError(err.message);
     }
   };
 
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     try {
       await api.createPlan({
         name: newPlanName,
         billing_interval: newPlanInterval,
-        price: Number(newPlanPrice),
-        auto_close: newPlanAutoClose ? 1 : 0
+        price: String(newPlanPrice),
+        min_quantity: Number(newPlanMinQty),
+        start_date: newPlanStart || undefined,
+        end_date: newPlanEnd || undefined,
+        auto_close: newPlanAutoClose,
+        can_pause: newPlanCanPause,
+        can_renew: newPlanCanRenew,
+        can_close_early: newPlanCanClose
       });
       setShowPlanModal(false);
+      setSaved('Plan saved.');
       loadData();
     } catch (err: any) {
-      alert('Failed: ' + err.message);
+      setError(err.message);
     }
   };
 
@@ -120,9 +139,10 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
         is_default: 0
       });
       setShowTaxModal(false);
+      setSaved('Tax rule saved. The next invoice uses it.');
       loadData();
     } catch (err: any) {
-      alert('Failed: ' + err.message);
+      setError(err.message);
     }
   };
 
@@ -139,9 +159,10 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
         applies_to: 'all'
       });
       setShowDiscountModal(false);
+      setSaved('Discount rule saved. It applies automatically to the subscriptions it is attached to.');
       loadData();
     } catch (err: any) {
-      alert('Failed: ' + err.message);
+      setError(err.message);
     }
   };
 
@@ -149,6 +170,8 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
 
   return (
     <div className="space-y-6">
+      {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
+      {saved && <Alert kind="success" onClose={() => setSaved(null)}>{saved}</Alert>}
       {/* Header */}
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -302,8 +325,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
                   </div>
                   <h3 className="font-bold text-slate-900 text-lg mt-2">{p.name}</h3>
                   <div className="text-2xl font-black text-odoo-500 mt-1">
-                    ${p.price.toFixed(2)}
-                    <span className="text-xs text-slate-400 font-normal"> / {p.billing_interval}</span>
+                    <span className="text-sm font-semibold">Billed {p.billing_interval}</span>
                   </div>
                 </div>
 
@@ -317,8 +339,16 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
                     <span className="font-bold text-slate-800">{p.auto_close ? 'Yes' : 'No'}</span>
                   </div>
                   <div className="flex justify-between text-slate-600">
-                    <span>Can pause early:</span>
+                    <span>Can pause:</span>
                     <span className="font-bold text-slate-800">{p.can_pause ? 'Yes' : 'No'}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>Can close early / renew:</span>
+                    <span className="font-bold text-slate-800">{p.can_close_early === 0 ? 'No' : 'Yes'} / {p.can_renew ? 'Yes' : 'No'}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>Available:</span>
+                    <span className="font-bold text-slate-800">{p.start_date ?? 'always'} → {p.end_date ?? 'open'}</span>
                   </div>
                 </div>
               </div>
@@ -540,13 +570,30 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser, onSelectTemplate 
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Base Price ($)</label>
-                  <input required type="number" value={newPlanPrice} onChange={e => setNewPlanPrice(Number(e.target.value))} className="w-full border p-2 rounded" />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Plan price (reference)</label>
+                  <input required type="number" min={0} step="0.01" value={newPlanPrice} onChange={e => setNewPlanPrice(Number(e.target.value))} className="w-full border p-2 rounded" />
                 </div>
               </div>
-              <div className="flex items-center gap-2 pt-2">
-                <input type="checkbox" id="autoclose" checked={newPlanAutoClose} onChange={e => setNewPlanAutoClose(e.target.checked)} />
-                <label htmlFor="autoclose" className="text-xs font-medium text-slate-700">Auto-close when plan expires</label>
+              <p className="text-[11px] text-slate-500">Invoices are built from the subscription lines (product price + variant extra); the plan price is informational.</p>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Min quantity</label>
+                  <input type="number" min={1} value={newPlanMinQty} onChange={e => setNewPlanMinQty(Math.max(1, Number(e.target.value) || 1))} className="w-full border p-2 rounded" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Available from</label>
+                  <input type="date" value={newPlanStart} onChange={e => setNewPlanStart(e.target.value)} className="w-full border p-2 rounded" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Available to</label>
+                  <input type="date" min={newPlanStart} value={newPlanEnd} onChange={e => setNewPlanEnd(e.target.value)} className="w-full border p-2 rounded" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 pt-1 text-xs font-medium text-slate-700">
+                <label className="flex items-center gap-2"><input type="checkbox" checked={newPlanAutoClose} onChange={e => setNewPlanAutoClose(e.target.checked)} /> Auto-close at expiry</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={newPlanCanClose} onChange={e => setNewPlanCanClose(e.target.checked)} /> Can be closed early</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={newPlanCanPause} onChange={e => setNewPlanCanPause(e.target.checked)} /> Can be paused</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={newPlanCanRenew} onChange={e => setNewPlanCanRenew(e.target.checked)} /> Can be renewed</label>
               </div>
               <div className="flex justify-end gap-2 pt-3 border-t">
                 <button type="button" onClick={() => setShowPlanModal(false)} className="px-3 py-1.5 border rounded">Cancel</button>

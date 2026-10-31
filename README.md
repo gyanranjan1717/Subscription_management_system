@@ -1,171 +1,130 @@
-# Brightloop Software — Subscription Management & Recurring Billing Platform
-> **Odoo × Make-A-Ton 9.0 Kochi Hackathon 2026 — Virtual Round Submission**  
-> **Repository:** [https://github.com/gyanranjan1717/Subscription_management_system.git](https://github.com/gyanranjan1717/Subscription_management_system.git)  
-> **Architecture:** Pure Relational Database (Strict 3NF + Constraints + Indexes) + Node.js/Express + React/TypeScript
+# Brightloop — Subscription Management & Recurring Billing
 
----
+Odoo × Make-A-Ton 9.0 (Kochi) · Round 1 · one system for products, plans, quotations, subscriptions, billing runs, invoices, payments and the finance dashboard.
 
-## 1. Executive Summary & Problem Fit
-Brightloop Software sells recurring software, add-ons, and brand variants across diverse billing cadences (daily, weekly, monthly, yearly). Prior to this platform, subscriptions were tracked across spreadsheets, leading to skipped invoices, accidental double billing, missing renewals, manual bank reconciliation, and zero real-time visibility into MRR/ARR.
+**Stack:** Node.js 24 + TypeScript + Express · SQLite (WAL, `node:sqlite`) · JWT + bcrypt · React + TypeScript + Vite + Tailwind. No other services.
 
-This platform provides the **digital backbone** for Brightloop, automating the full lifecycle from products, variants, quotation templates, and subscriptions through to idempotent billing cycles, tax/discount calculation, invoice dispatch, and cash collection.
+## 1. What it does
 
----
+`Product → Variant → Plan → Quotation → Subscription → Active → Billing run → Invoice → Payment → Paid → Customer portal → Finance dashboard`
 
-## 2. Requirements Coverage Matrix (All 22 Items Verified)
+The point of the project is **billing correctness**: running billing twice creates 0 invoices the second time, periods are never skipped (catch-up), every amount is exact to the cent, and a built-in integrity report proves it.
 
-| # | Requirement from Brief | Implementation & Defense | Status |
-|---|---|---|:---:|
-| 1 | **Customer Account Signup** | One account per email, duplicate email rejection, bcrypt hashed passwords | **VERIFIED** |
-| 2 | **Password Validation Trap** | Must be **more than 8 characters** (min 9 chars), with at least 1 uppercase, 1 lowercase, and 1 special character | **VERIFIED** |
-| 3 | **Password Reset Link** | Dispatches tokenized reset URL to registered email; audit-logged in database | **VERIFIED** |
-| 4 | **Role-Based Access Control** | Three distinct roles: **Admin** (master rules/staff), **Staff** (day-to-day operations), **Customer** (tenant portal) | **VERIFIED** |
-| 5 | **Staff Provisioning by Admin Only** | Strict RBAC middleware: non-admin receiving `403 Forbidden` on staff creation | **VERIFIED** |
-| 6 | **Customer Portal Tenant Isolation** | Customers query and view **ONLY** their own subscriptions and invoices | **VERIFIED** |
-| 7 | **Products Master** | Name, type (`service`, `software`, `addon`, `consumable`), sales price, cost price, notes | **VERIFIED** |
-| 8 | **Product Variants & Pricing** | Support for brand variants (e.g. selecting Odoo brand variant adds **+$560** to base price) | **VERIFIED** |
-| 9 | **Plans & Billing Cadences** | Daily, Weekly, Monthly, Yearly intervals with minimum quantity validation | **VERIFIED** |
-| 10 | **Plan Lifecycle Policies** | Plan-level flags: `auto_close` (closes when end date reached), `can_pause`, `can_renew` | **VERIFIED** |
-| 11 | **Quotation Templates** | Pre-bundled templates with plan and product lines, valid for a configurable number of days | **VERIFIED** |
-| 12 | **Convert Quote to Subscription** | Automatically populates unique subscription number, lines, unit prices, and payment terms | **VERIFIED** |
-| 13 | **Subscription State Machine** | Strict transitions: `Draft` &rarr; `Quotation` &rarr; `Confirmed` &rarr; `Active` &rarr; `Closed` / `Paused` | **VERIFIED** |
-| 14 | **Team Lifecycle Visibility** | Anyone on staff/admin team can view real-time state of any subscription | **VERIFIED** |
-| 15 | **Automated Billing Engine** | Batch-evaluates all active subscriptions due as of target date without manual typing | **VERIFIED** |
-| 16 | **Idempotent Billing (TRAP)** | **Never bills twice or skips a period**: enforced via relational `UNIQUE(subscription_id, period_start)` & transactions | **VERIFIED** |
-| 17 | **Automated Tax Calculation** | Evaluates active tax master rules (e.g. GST 18%, reduced 5%, zero 0%) dynamically per line | **VERIFIED** |
-| 18 | **Discount Rules Engine** | Fixed or percentage; min order amount or quantity; start/end dates; usage limits | **VERIFIED** |
-| 19 | **Discount Auto-Application** | Applies to whole subscription or target product; auto-expires when date or usage cap is hit | **VERIFIED** |
-| 20 | **Invoice Lifecycle & Print/Send** | `Draft` &rarr; `Confirmed` &rarr; `Paid`; printable professional invoice view; email dispatch simulation | **VERIFIED** |
-| 21 | **Multi-Method Payments** | Bank Transfer, Credit Card, UPI, Cash, Cheque; partial payments; auto-advances to `Paid` | **VERIFIED** |
-| 22 | **Finance Lead Dashboard & Sub-2s SLA** | Real-time MRR, ARR, cash collected, accounts receivable, overdue chaser list; **< 15ms latency** on 1,000+ subs | **VERIFIED** |
+## 2. Architecture
 
----
-
-## 3. Database Schema & Architecture
-
-### 3.1 Entity Relationship Diagram (ERD)
 ```
-+----------------+        +--------------------------+        +-----------------------+
-|     users      | 1    * |      subscriptions       | 1    * |  subscription_lines   |
-|----------------|--------|--------------------------|--------|-----------------------|
-| id (PK)        |        | id (PK)                  |        | id (PK)               |
-| email (UNIQUE) |        | subscription_number (UQ) |        | subscription_id (FK)  |
-| password_hash  |        | customer_id (FK)         |        | product_id (FK)       |
-| role           |        | plan_id (FK)             |        | variant_id (FK)       |
-| full_name      |        | status                   |        | quantity              |
-+----------------+        | next_billing_date        |        | unit_price            |
-                          | discount_rule_id (FK)    |        | tax_id (FK)           |
-                          +-------------+------------+        | line_amount           |
-                                        | 1                   +-----------------------+
-                                        |
-                                        | *
-                          +-------------v------------+        +-----------------------+
-                          |         invoices         | 1    * |     invoice_lines     |
-                          |--------------------------|--------|-----------------------|
-                          | id (PK)                  |        | id (PK)               |
-                          | invoice_number (UNIQUE)  |        | invoice_id (FK)       |
-                          | subscription_id (FK)     |        | product_id (FK)       |
-                          | customer_id (FK)         |        | variant_id (FK)       |
-                          | period_start             |        | description           |
-                          | period_end               |        | quantity              |
-                          | subtotal                 |        | line_total            |
-                          | tax_amount               |        +-----------------------+
-                          | discount_amount          |
-                          | total_amount             |        +-----------------------+
-                          | amount_paid              | 1    * |       payments        |
-                          | status                   |--------|-----------------------|
-                          | UNIQUE(sub_id, p_start)  |        | id (PK)               |
-                          +--------------------------+        | invoice_id (FK)       |
-                                                              | amount, method, date  |
-                                                              +-----------------------+
+frontend/ (React, Vite)      backend/src/
+  pages/  Login, Dashboard,    routes/      thin HTTP layer: auth, validation, status codes
+          Catalog, Subs,       services/    business rules (billing, invoice math, discounts,
+          BillingRun, Invoices,             tax, state machine, payments, integrity report)
+          CustomerPortal       lib/         exact money (integer cents), dates, validation, errors
+  components/ ui, Pager        db/          schema.sql (constraints + indexes), database.ts, seed.ts
+backend/tests/   73 tests      scripts/benchmark.ts   reproducible performance benchmark
 ```
 
-### 3.2 The Zero Double-Billing & Idempotency Guarantee
-The engine enforces zero duplicate billing through a dual-defense mechanism:
-1. **Relational Database Uniqueness**:
-   ```sql
-   CONSTRAINT uq_sub_period UNIQUE(subscription_id, period_start)
-   ```
-2. **Transactional Engine Catch-up**:
-   `runBillingCycle(asOfDate)` runs in an atomic transaction. If an invoice for the subscription's `next_billing_date` was already created, the query identifies the existing invoice, increments `skippedDuplicates`, and creates **0** duplicate invoices.
+More detail in [ARCHITECTURE.md](ARCHITECTURE.md); requirement-by-requirement spec in [SPEC.md](SPEC.md).
 
----
+## 3. Setup, run, test
 
-## 4. Quick Start & Setup
+Requires Node 22+ (developed on 24).
 
-### Prerequisites
-- Node.js (v18+)
-- npm
-
-### 1-Command Setup & Run
 ```bash
-# 1. Install dependencies for backend and frontend, and seed database
-npm run setup
-
-# 2. Run automated test suite verifying all 22 business rules & traps
-npm test
-
-# 3. Start development servers
-npm run dev
+npm --prefix backend install
+npm --prefix frontend install
+npm run seed          # (re)builds the SQLite database with demo data. Wipes existing data.
+npm run dev           # API on :5000, UI on http://localhost:3000
+npm test              # 73 backend tests
+npm run build         # type-checks and builds backend and frontend
+npm run benchmark     # builds a 5,000-subscription dataset and times the real endpoints
 ```
 
-The application will be live at:
-- **Frontend App:** [http://localhost:3000](http://localhost:3000)
-- **Backend API:** [http://localhost:5000](http://localhost:5000)
+Copy `.env.example` to `backend/.env` to change settings. In production `JWT_SECRET` (16+ chars) is mandatory and the password-reset link is not returned by the API unless `EXPOSE_RESET_LINK=true` is set explicitly.
 
----
+## 4. Demo accounts
 
-## 5. Demo Accounts & Evaluator Personas
-
-The top banner includes a **1-Click Persona Switcher** allowing instant testing of roles without retyping credentials:
-
-| Persona | Role | Email | Password | What to Test |
-|---|---|---|---|---|
-| **Alex Mercer** | `admin` | `admin@brightloop.com` | `Brightloop#2026` | Full system access, staff provisioning, master discount & tax rule authoring |
-| **Sarah Jenkins** | `staff` | `staff@brightloop.com` | `Brightloop#2026` | Day-to-day operations, billing run execution, invoice dispatch, recording payments |
-| **David Miller (Acme Corp)** | `customer` | `acme@corp.com` | `Customer#2026` | Strict isolation: sees only Acme Corp data; pauses subscription; prints invoice |
-| **Elena Rostova (Globex Inc)** | `customer` | `globex@biz.com` | `Customer#2026` | Multi-tenant test: verifies zero leakage of Acme Corp data |
-
----
-
-## 6. Video Demo Script (5:30 Minute Walkthrough)
-
-| Time | On Screen | Narration & Focus Points |
+| Role | Email | Password |
 |---|---|---|
-| **0:00 - 0:25** | Login screen & Platform overview | Introduce Brightloop Software: digital backbone for recurring subscription business. State problem: renewals missed, manual spreadsheets, double billing risks. |
-| **0:25 - 1:00** | Executive Finance Dashboard | Show real-time MRR, ARR, cash collected vs accounts receivable. Point out **Sub-2-Second SLA badge** (<15ms response time on 1,000+ subscriptions). |
-| **1:00 - 1:45** | Catalog, Variants & Plans | Show products with variants (Odoo Brand adds **+$560**). Highlight billing intervals (daily, weekly, monthly, yearly) and plan policies. |
-| **1:45 - 2:45** | Quotation Template & Subscription Lifecycle | Convert "Odoo Enterprise Strategic Stack" quotation template into a Subscription. Walk state machine: `Draft` &rarr; `Quotation` &rarr; `Confirmed` &rarr; `Active`. |
-| **2:45 - 3:45** | Billing Day & The Zero Double-Billing Proof | Open Billing Run Engine. Click **Execute Billing Cycle**. Show generated invoices. **Click execute a second time** &rarr; proves **0 duplicate invoices created (100% idempotent)**! |
-| **3:45 - 4:30** | Invoicing, Taxes, Discounts & Payment | Open generated invoice. Show auto-calculated taxes and volume discount. Record a partial and full payment (UPI/Card/Bank Transfer) &rarr; status updates to `Paid`. |
-| **4:30 - 5:00** | Customer Portal Isolation & Password Reset | Switch to Customer 1 (Acme Corp) &rarr; show only Acme records appear. Switch to Customer 2 &rarr; zero cross-tenant leakage. Show password reset workflow. |
-| **5:00 - 5:30** | Codebase, Tests & Wrap-up | Show clean repository structure, green test suite (`14/14 tests passing`), and database constraints. |
+| Admin | admin@brightloop.com | Brightloop#2026 |
+| Staff | staff@brightloop.com | Brightloop#2026 |
+| Customer (Acme) | acme@corp.com | Customer#2026 |
+| Customer (Globex) | globex@biz.com | Customer#2026 |
 
----
+The sign-in page fills these for you; the bar at the top of the app switches between them with one click.
 
-## 7. Automated Test Suite Evidence
+## 5. Demo data
 
-Run `npm test` inside `backend/` to verify:
-```
-===============================================================
- STARTING BRIGHTLOOP VERIFICATION & TRAP TEST SUITE
-===============================================================
- [PASS] TRAP 1: Password validator accepts >= 9 chars with upper, lower, special
- [PASS] TRAP 1: Password validator rejects 8 characters even with all char types
- [PASS] TRAP 1: Password validator rejects missing uppercase letter
- [PASS] TRAP 1: Password validator rejects missing special character
- [PASS] Catalog: Odoo Brand Variant adds exactly 560 to price
- [PASS] State Machine: allows legal transitions Draft -> Quotation -> Confirmed -> Active -> Closed
- [PASS] State Machine: rejects illegal transition Draft -> Active directly
- [PASS] State Machine: rejects transitions from terminal Closed state
- [PASS] TRAP 4: Billing engine generates invoices for due active subscriptions
- [PASS] TRAP 4: Second billing run produces EXACTLY ZERO duplicate invoices
- [PASS] TRAP 4: Attempting to insert duplicate period directly is blocked by DB unique constraint
- [PASS] Discounts: Volume discount correctly applies for qualifying seats
- [PASS] Discounts: Correctly rejects expired discount rule
-       Query duration for 1007 records: 0.14ms
- [PASS] Performance SLA: Analytical summary executes well under 2,000ms (<50ms)
-===============================================================
- RESULTS: 14/14 TESTS PASSED!
-===============================================================
-```
+`npm run seed` creates 7 subscriptions (Draft, Quotation, Paused, Closed and three Active, two of them months behind) and one historic billing run with a partly paid, overdue invoice. Three Active subscriptions are due today, so the first run shows a catch-up and the second run shows `0`.
+
+## 6. Billing idempotency (how "never twice, never skipped" works)
+
+- **Cursor.** Each subscription stores `next_period_index` / `next_billing_date`. Period *k* starts at `start_date + k × interval`, always computed from the start date (so 31 Jan → 28 Feb → 31 Mar, never drifting; leap days handled).
+- **Catch-up.** A run advances one period at a time until the cursor passes the "bill as of" date, so a subscription that is three months behind gets three invoices, not one.
+- **Database is the authority.** `UNIQUE(subscription_id, period_start)` and `UNIQUE(subscription_id, period_index)` on `invoices`. Even a buggy caller cannot insert a second invoice for a period.
+- **Transactions.** Each subscription is billed inside its own `BEGIN IMMEDIATE` transaction: it re-reads the cursor after taking the write lock, inserts invoice, lines, discount record and cursor update together, and rolls back as a unit on any error. One failing subscription never blocks or undoes the others (tested with an injected mid-catch-up failure).
+- **Concurrency.** A test starts four real OS processes billing the same file database at once: every period is created exactly once and a 5-use discount is handed out exactly 5 times.
+- **Proof in the UI.** Billing Run shows invoices created per run and a live integrity report (duplicate periods, missing periods, total and payment mismatches, invalid references), all computed from the database. *Preview* runs the whole calculation and rolls it back.
+
+## 7. Money
+
+All arithmetic is in integer cents with HALF_UP rounding per line (`backend/src/lib/money.ts`, one calculator in `services/invoiceCalculator.ts`). `total = subtotal − discount + tax` is checked by a database `CHECK`. Amounts typed by users are parsed from strings, never through floats. Line unit price = product price + variant extra, copied when the line is created; later price changes never touch existing lines or invoices. Tax is calculated per line on the discounted amount and the rate is stored on the invoice line.
+
+## 8. Security, RBAC and customer isolation
+
+- Passwords: more than 8 characters (9–64), upper + lower + special, digits not required; bcrypt hashes. Email unique case-insensitively through a database index (`lower(email)`), duplicates return 409.
+- Reset: random 32-byte token, only its SHA-256 is stored, 30-minute expiry, single use, a new request kills older links, identical answer for unknown emails. The "email" lands in `email_outbox` (dev mailbox); there is no SMTP.
+- JWT (HS256) is verified, then the user is re-read from the database on every request, so role changes and deactivation take effect immediately. Login/forgot-password are rate limited.
+- Roles are enforced on the server: only **admin** creates staff, products, plans, taxes, discounts and templates; **staff** runs billing, confirms invoices, records payments; **customers** have no catalog/billing/dashboard access. The UI hides what a role cannot use, but nothing relies on that.
+- **Isolation.** A customer asking for another customer's subscription, timeline, invoice, renewal or status change gets the same `404` as for an id that does not exist. List endpoints force the customer filter from the token, so query parameters cannot widen it. Tested explicitly.
+- Errors never expose stack traces or SQL; CSV exports neutralise spreadsheet formulas; request bodies are size-limited; every write input is validated server-side.
+
+## 9. Performance (measured)
+
+`npm run benchmark` on the author's laptop (Node 24, Windows, i5-1235U, file database) with 2,000 customers, 5,000 subscriptions, 25,024 invoices, 17,891 payments, 500 due today, real HTTP requests, 20 runs each:
+
+- Slowest request across all list/dashboard/portal endpoints: **236 ms** (billing integrity report); finance dashboard median **35 ms**, invoice list page median **3 ms**, deep pages (page 200) **9 ms**.
+- Real billing run for the 500 due subscriptions: **524 ms**; repeat run: **0 invoices, 0 ms**.
+
+Run-to-run noise on this machine is roughly 2–3×, so treat the numbers as an order of magnitude; the full table (and the query plans, which all use indexes) is in [docs/PERFORMANCE_RESULTS.md](docs/PERFORMANCE_RESULTS.md) and is regenerated by each benchmark run. Every list is paginated (100 rows by default, 200 max), aggregates run in SQL, and tests assert that list endpoints execute a constant number of statements regardless of page size.
+
+## 10. Requirement coverage (R01–R25 from SPEC.pdf)
+
+"Tested" = an automated test in `backend/tests`. "Demo" = where to show it. Details and assumptions in [SPEC.md](SPEC.md).
+
+| ID | Requirement | Status | Test | Demo |
+|---|---|---|---|---|
+| R01 | Customer sign-up | Implemented | api | Sign-in page → Create account |
+| R02 | One account per email (case-insensitive) | Implemented (DB index) | api | Create account twice |
+| R03 | Password rule (>8, upper, lower, special) | Implemented | money_dates, api | Sign-up form |
+| R04 | Reset link to registered email | Implemented; dev outbox, no SMTP | api | Customer Portal → reset |
+| R05 | Three roles, customer portal | Implemented | api | Persona switcher |
+| R06 | Only admin adds staff | Implemented (admin sets initial password; no invite email) | api | Staff Admin |
+| R07 | Product: name, type, prices, notes | Implemented | catalog_lists | Catalog → Products |
+| R08 | Variants (Odoo +560) | Implemented | billing, catalog_lists, demo_story | Create subscription (1560) |
+| R09 | Plan: cadence, min qty, dates | Implemented; plan price is informational, not billed | catalog_lists, api | Catalog → Plans |
+| R10 | Per-plan close/pause/renew/auto-close | Implemented | api, billing | Plan form + portal buttons |
+| R11 | Quotation templates with validity | Implemented | catalog_lists, api | New subscription → template |
+| R12 | Subscription number, lines, min qty | Implemented | api, billing | Subscriptions |
+| R13 | Draft→Quotation→Confirmed→Active→Closed (+Paused) | Implemented; timeline per subscription | api | Subscriptions, Activity |
+| R14 | Invoices created from subscriptions | Implemented (Draft) | billing | Billing Run |
+| R15 | Automatic tax from admin rules | Implemented (rate edit via API; no edit screen) | billing, catalog_lists | Invoice view |
+| R16 | Confirm / cancel / send / print | Implemented (send = outbox; print = browser print) | api, catalog_lists | Invoices |
+| R17 | Nothing billed twice or skipped | Implemented | billing, concurrency, demo_story | Billing Run ×2 |
+| R18 | Admin-only discount rules | Implemented | api, billing | Catalog → Discounts |
+| R19 | Product vs subscription scope | Implemented (one rule per subscription) | billing | Invoice discount line |
+| R20 | Discount appears and stops by itself | Implemented | billing | Invoice view |
+| R21 | Payments: method, amount, date, note | Implemented (partial; no overpayment) | api, demo_story | Pay button |
+| R22 | Paid / outstanding / overdue, chasing | Implemented; no separate reminder email | api | Invoices, Dashboard |
+| R23 | Finance view with filters | Implemented (date-range filter) | catalog_lists, api | Dashboard |
+| R24 | Pages under 2 s with thousands of rows | Measured, see section 9 | performance | `npm run benchmark` |
+| R25 | Customer self-service | Implemented | api | Customer Portal |
+
+## 11. Known limitations
+
+- SQLite single-writer: billing is serialised per database file. Fine for this scale; a multi-node deployment would need PostgreSQL.
+- Plan `price` is stored but not invoiced as a separate fee (SPEC assumption A2 left open); invoices come from subscription lines.
+- Invoice numbers are assigned when billing creates the invoice, not at confirmation.
+- One discount rule per subscription (SPEC A10 allows best-of several).
+- Tax-rate editing exists in the API only, not in the UI. There is no endpoint to deactivate users (the `active` column is enforced at login but only set in the database).
+- Money is stored as 2-decimal numbers (computed in cents, protected by `CHECK`) rather than integer columns.
+- Frontend has no automated tests; it is type-checked, built and was exercised manually.
+- Database schema is versioned; after an update run `npm run seed` (it rebuilds the database).

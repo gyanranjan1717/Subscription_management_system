@@ -179,3 +179,51 @@ test('dashboard: period filter changes invoiced/collected but not the receivable
   assert.ok(all.financials.totalInvoiced >= 1180);
   assert.equal((await api('GET', '/analytics/summary?from=nope', f.staff)).status, 400);
 });
+
+// ---- quotation templates, tax edits, invoice dispatch ---------------------------------------------
+
+test('quotation: a template copies its plan and lines, and the quotation validity comes from the template', async () => {
+  const tpl = await api('POST', '/catalog/quotation-templates', f.admin, {
+    name: 'Starter', plan_id: f.monthlyPlan, validity_days: 14,
+    lines: [{ product_id: f.productId, variant_id: f.odooVariant, default_quantity: 3 }]
+  });
+  assert.equal(tpl.status, 201);
+  assert.equal((await api('POST', '/catalog/quotation-templates', f.staff, { name: 'x', plan_id: f.monthlyPlan })).status, 403);
+
+  const sub = await api('POST', '/subscriptions', f.staff, { template_id: tpl.body.templateId, customer_id: f.custA, start_date: '2064-01-01' });
+  assert.equal(sub.status, 201);
+  const id = sub.body.subscription.id;
+  const lines = queryAll<any>('SELECT quantity, unit_price FROM subscription_lines WHERE subscription_id = ?', [id]);
+  assert.deepEqual(lines.map(l => [l.quantity, l.unit_price]), [[3, 1560]]);
+  assert.equal(queryOne<any>('SELECT plan_id FROM subscriptions WHERE id = ?', [id]).plan_id, f.monthlyPlan);
+
+  assert.equal((await api('PATCH', `/subscriptions/${id}/status`, f.staff, { status: 'Quotation' })).status, 200);
+  const q = queryOne<any>('SELECT quotation_sent_on AS sent, quotation_valid_until AS until FROM subscriptions WHERE id = ?', [id]);
+  const days = Math.round((Date.parse(q.until) - Date.parse(q.sent)) / 86400000);
+  assert.equal(days, 14);
+});
+
+test('tax: an admin edit applies to the next invoice and never rewrites an issued one', async () => {
+  const taxId = Number(execute("INSERT INTO tax_rules (name, rate_percentage) VALUES ('Edit me', 10)").lastInsertRowid);
+  const s = newSubscription({ customer: f.custA, plan: f.monthlyPlan, start: '2065-01-01', lines: [{ product: f.productId, unit: 100, tax: taxId }] });
+  execute(`UPDATE subscriptions SET status = 'Closed' WHERE status = 'Active' AND id <> ${s}`);
+  runBillingCycle('2065-01-01');
+  assert.equal((await api('PATCH', `/catalog/taxes/${taxId}`, f.staff, { rate_percentage: 20 })).status, 403);
+  assert.equal((await api('PATCH', `/catalog/taxes/${taxId}`, f.admin, { rate_percentage: 150 })).status, 400);
+  assert.equal((await api('PATCH', `/catalog/taxes/${taxId}`, f.admin, { rate_percentage: 20 })).status, 200);
+  runBillingCycle('2065-02-01');
+  const taxes = queryAll<any>('SELECT tax_amount FROM invoices WHERE subscription_id = ? ORDER BY period_index', [s]).map(i => i.tax_amount);
+  assert.deepEqual(taxes, [10, 20]);
+});
+
+test('invoices: sending an invoice writes the email to the outbox and the audit log; customers cannot send', async () => {
+  const s = newSubscription({ customer: f.custB, plan: f.monthlyPlan, start: '2066-01-01', lines: [{ product: f.productId, unit: 50 }] });
+  runBillingCycle('2066-01-01');
+  const inv = queryOne<any>('SELECT id, invoice_number FROM invoices WHERE subscription_id = ?', [s])!;
+  assert.equal((await api('POST', `/billing/invoices/${inv.id}/send`, f.b, {})).status, 403);
+  const sent = await api('POST', `/billing/invoices/${inv.id}/send`, f.staff, {});
+  assert.equal(sent.status, 200);
+  const mail = queryOne<any>("SELECT to_email, subject FROM email_outbox WHERE kind = 'INVOICE' ORDER BY id DESC")!;
+  assert.deepEqual([mail.to_email, mail.subject], ['b@test.com', `Invoice ${inv.invoice_number}`]);
+  assert.equal(queryAll<any>("SELECT id FROM audit_logs WHERE event_type = 'INVOICE_SENT' AND invoice_id = ?", [inv.id]).length, 1);
+});

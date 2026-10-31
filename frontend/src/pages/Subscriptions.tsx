@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api.js';
 import Pager, { PageInfo } from '../components/Pager.js';
+import { Alert, EmptyState, Loading, StatusBadge } from '../components/ui.js';
+import { formatMoney, today } from '../lib/format.js';
 import { Subscription, Plan, Product, QuotationTemplate, DiscountRule } from '../types.js';
 import {
   FileText, Plus, Filter, CheckCircle, ArrowRight, PauseCircle,
@@ -23,8 +25,16 @@ export const Subscriptions: React.FC = () => {
   const [products, setProducts] = useState<Product[]>([]);
   const [discounts, setDiscounts] = useState<DiscountRule[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
-  const [customerId, setCustomerId] = useState<number>(3); // default Acme Corp
-  const [planId, setPlanId] = useState<number>(2);
+  const [customers, setCustomers] = useState<Array<{ id: number; email: string; full_name: string; company_name: string | null }>>([]);
+  const [customerId, setCustomerId] = useState<number>(0);
+  const [planId, setPlanId] = useState<number>(0);
+  const [startDate, setStartDate] = useState<string>(today());
+  const [expiryDate, setExpiryDate] = useState<string>('');
+  const [paymentTerms, setPaymentTerms] = useState<string>('Immediate Payment');
+  const [lines, setLines] = useState<Array<{ product_id: number; variant_id: number | null; quantity: number }>>([]);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState('');
   const [discountId, setDiscountId] = useState<string>('');
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -32,12 +42,13 @@ export const Subscriptions: React.FC = () => {
 
   const loadData = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const res = await api.getSubscriptions({ status: statusFilter, page });
+      const res = await api.getSubscriptions({ status: statusFilter, page, q: searchTerm || undefined });
       setSubscriptions(res.subscriptions);
       setPageInfo(res.pagination);
     } catch (err: any) {
-      alert('Error loading subscriptions: ' + err.message);
+      setError('Could not load subscriptions: ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -45,35 +56,50 @@ export const Subscriptions: React.FC = () => {
 
   const loadCatalogForModal = async () => {
     try {
-      const [tplRes, plansRes, prodRes, discRes] = await Promise.all([
+      const [tplRes, plansRes, prodRes, discRes, custRes] = await Promise.all([
         api.getQuotationTemplates(),
         api.getPlans(),
         api.getProducts(),
-        api.getDiscounts()
+        api.getDiscounts(),
+        api.getCustomers()
       ]);
       setTemplates(tplRes.templates);
       setPlans(plansRes.plans);
       setProducts(prodRes.products);
       setDiscounts(discRes.discounts);
+      setCustomers(custRes.customers);
+      if (!customerId && custRes.customers[0]) setCustomerId(custRes.customers[0].id);
+      if (!planId && plansRes.plans[0]) setPlanId(plansRes.plans[0].id);
+      if (lines.length === 0 && prodRes.products[0]) {
+        const p = prodRes.products[0];
+        setLines([{ product_id: p.id, variant_id: p.variants?.[0]?.id ?? null, quantity: 1 }]);
+      }
     } catch (err: any) {
-      console.error('Error loading catalog metadata', err);
+      setFormError('Could not load the catalog: ' + err.message);
     }
   };
 
-  // One request per change: a new filter goes back to page 1 instead of fetching the stale page first.
-  const lastStatusFilter = useRef(statusFilter);
   useEffect(() => {
-    if (lastStatusFilter.current !== statusFilter) {
-      lastStatusFilter.current = statusFilter;
+    const t = setTimeout(() => setSearchTerm(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // One request per change: a new filter goes back to page 1 instead of fetching the stale page first.
+  const filterKey = `${statusFilter}|${searchTerm}`;
+  const lastStatusFilter = useRef(filterKey);
+  useEffect(() => {
+    if (lastStatusFilter.current !== filterKey) {
+      lastStatusFilter.current = filterKey;
       if (page !== 1) {
         setPage(1);
         return;
       }
     }
     loadData();
-  }, [statusFilter, page]);
+  }, [filterKey, page]);
 
   const openCreateModal = () => {
+    setFormError(null);
     loadCatalogForModal();
     setModalOpen(true);
   };
@@ -81,37 +107,39 @@ export const Subscriptions: React.FC = () => {
   const handleCreateSubscription = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
+    setFormError(null);
     try {
       const payload: any = {
         customer_id: customerId,
         plan_id: planId,
+        start_date: startDate,
+        expiry_date: expiryDate || undefined,
+        payment_terms: paymentTerms,
         notes: notes || undefined,
-        discount_rule_id: discountId ? Number(discountId) : undefined,
-        initial_status: 'Draft'
+        discount_rule_id: discountId ? Number(discountId) : undefined
       };
 
       if (selectedTemplateId) {
         payload.template_id = Number(selectedTemplateId);
       } else {
-        // default with flagship product
-        payload.lines = [
-          { product_id: products[0]?.id || 1, default_quantity: 1 }
-        ];
+        payload.lines = lines.map(l => ({ product_id: l.product_id, variant_id: l.variant_id ?? undefined, quantity: l.quantity }));
       }
 
       const res = await api.createSubscription(payload);
-      setActionNotice(`Created subscription ${res.subscription.subscription_number}!`);
-      setTimeout(() => setActionNotice(null), 4000);
+      setActionNotice(`Created ${res.subscription.subscription_number} as Draft. Use Send quote, Confirm, then Activate.`);
+      setTimeout(() => setActionNotice(null), 8000);
       setModalOpen(false);
       loadData();
     } catch (err: any) {
-      alert('Failed to create subscription: ' + err.message);
+      setFormError(err.message);
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleStatusChange = async (subId: number, newStatus: string) => {
+    if (newStatus === 'Closed' && !window.confirm('Close this subscription? A closed subscription cannot be reopened.')) return;
+    setError(null);
     try {
       const res = await api.updateSubscriptionStatus(subId, newStatus);
       setActionNotice(res.message);
@@ -121,7 +149,7 @@ export const Subscriptions: React.FC = () => {
         viewSubscriptionDetails(subId);
       }
     } catch (err: any) {
-      alert('State transition failed: ' + err.message);
+      setError(err.message);
     }
   };
 
@@ -130,25 +158,11 @@ export const Subscriptions: React.FC = () => {
       const res = await api.getSubscription(id);
       setSelectedSub(res.subscription);
     } catch (err: any) {
-      alert('Error fetching details: ' + err.message);
+      setError('Could not open the subscription: ' + err.message);
     }
   };
 
-  const getStatusBadge = (status: string) => {
-    const map: Record<string, string> = {
-      Active: 'bg-emerald-100 text-emerald-800 border-emerald-200',
-      Confirmed: 'bg-blue-100 text-blue-800 border-blue-200',
-      Quotation: 'bg-indigo-100 text-indigo-800 border-indigo-200',
-      Draft: 'bg-slate-100 text-slate-800 border-slate-200',
-      Paused: 'bg-amber-100 text-amber-800 border-amber-200',
-      Closed: 'bg-red-100 text-red-800 border-red-200'
-    };
-    return (
-      <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${map[status] || 'bg-gray-100 text-gray-800'}`}>
-        {status}
-      </span>
-    );
-  };
+  const getStatusBadge = (status: string) => <StatusBadge status={status} />;
 
   return (
     <div className="space-y-6">
@@ -163,7 +177,7 @@ export const Subscriptions: React.FC = () => {
 
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={() => window.open('/api/analytics/export/subscriptions', '_blank')}
+            onClick={() => api.downloadCsv('subscriptions').catch(err => setError(err.message))}
             className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold border border-slate-300 transition-all flex items-center gap-1.5"
             title="Download CSV"
           >
@@ -179,12 +193,8 @@ export const Subscriptions: React.FC = () => {
         </div>
       </div>
 
-      {actionNotice && (
-        <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 px-4 py-3 rounded-lg text-sm flex items-center justify-between shadow-sm">
-          <span>{actionNotice}</span>
-          <button onClick={() => setActionNotice(null)} className="text-emerald-700 font-bold">×</button>
-        </div>
-      )}
+      {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
+      {actionNotice && <Alert kind="success" onClose={() => setActionNotice(null)}>{actionNotice}</Alert>}
 
       {/* Filter Tabs & Search */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -207,9 +217,9 @@ export const Subscriptions: React.FC = () => {
         <div className="w-full sm:w-64">
           <input
             type="text"
-            placeholder="Search subscriptions or customers..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
+            placeholder="Subscription number starts with…"
+            value={searchInput}
+            onChange={e => setSearchInput(e.target.value)}
             className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-odoo-500"
           />
         </div>
@@ -233,16 +243,6 @@ export const Subscriptions: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {subscriptions
-                  .filter(s => {
-                    if (!searchTerm) return true;
-                    const term = searchTerm.toLowerCase();
-                    return (
-                      s.subscription_number.toLowerCase().includes(term) ||
-                      s.customer_name.toLowerCase().includes(term) ||
-                      (s.company_name && s.company_name.toLowerCase().includes(term)) ||
-                      s.plan_name.toLowerCase().includes(term)
-                    );
-                  })
                   .map(s => (
                   <tr
                     key={s.id}
@@ -311,7 +311,7 @@ export const Subscriptions: React.FC = () => {
                           Resume
                         </button>
                       )}
-                      {['Active', 'Paused', 'Draft', 'Quotation', 'Confirmed'].includes(s.status) && (
+                      {['Active', 'Paused', 'Draft', 'Quotation', 'Confirmed'].includes(s.status) && s.can_close_early !== 0 && (
                         <button
                           onClick={() => handleStatusChange(s.id, 'Closed')}
                           className="px-2 py-1 bg-red-50 text-red-700 hover:bg-red-100 rounded text-xs font-semibold"
@@ -325,6 +325,10 @@ export const Subscriptions: React.FC = () => {
               </tbody>
             </table>
           </div>
+          {loading && <Loading label="Loading subscriptions…" />}
+          {!loading && subscriptions.length === 0 && (
+            <EmptyState title="No subscriptions match" hint="Create one with the button above, or change the filter." />
+          )}
           <Pager info={pageInfo} onPage={setPage} />
         </div>
 
@@ -363,7 +367,7 @@ export const Subscriptions: React.FC = () => {
               {selectedSub.discount_code && (
                 <div className="flex justify-between bg-purple-50 p-2 rounded border border-purple-200">
                   <span className="text-odoo-500 font-semibold">Discount Attached:</span>
-                  <span className="font-bold text-odoo-500">{selectedSub.discount_code} ({selectedSub.discount_value}{selectedSub.discount_type === 'percentage' ? '%' : '$'})</span>
+                  <span className="font-bold text-odoo-500">{selectedSub.discount_code} ({selectedSub.discount_type === 'percentage' ? `${selectedSub.discount_value}%` : formatMoney(selectedSub.discount_value)})</span>
                 </div>
               )}
             </div>
@@ -378,12 +382,12 @@ export const Subscriptions: React.FC = () => {
                       <div className="font-semibold text-slate-800">{l.product_name}</div>
                       {l.option_name && (
                         <div className="text-[11px] text-odoo-500 font-medium">
-                          Variant: {l.attribute_name} - {l.option_name} (+${l.price_extra})
+                          Variant: {l.attribute_name} - {l.option_name} (+{formatMoney(l.price_extra)})
                         </div>
                       )}
-                      <div className="text-[11px] text-slate-400">Qty: {l.quantity} × ${l.unit_price.toFixed(2)}</div>
+                      <div className="text-[11px] text-slate-400">Qty: {l.quantity} × {formatMoney(l.unit_price)}</div>
                     </div>
-                    <div className="font-bold text-slate-900">${l.line_amount.toFixed(2)}</div>
+                    <div className="font-bold text-slate-900">{formatMoney(l.line_amount)}</div>
                   </div>
                 ))}
               </div>
@@ -397,8 +401,8 @@ export const Subscriptions: React.FC = () => {
                   {selectedSub.invoices.map(inv => (
                     <div key={inv.id} className="p-2 bg-slate-50 rounded flex justify-between items-center">
                       <span className="font-medium text-odoo-500">{inv.invoice_number}</span>
-                      <span className="font-mono text-slate-600">${inv.total_amount.toFixed(2)}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 font-semibold">{inv.status}</span>
+                      <span className="font-mono text-slate-600">{formatMoney(inv.total_amount)}</span>
+                      <StatusBadge status={inv.status} />
                     </div>
                   ))}
                 </div>
@@ -413,7 +417,7 @@ export const Subscriptions: React.FC = () => {
       {/* Modal: Create Subscription / Convert from Quotation Template */}
       {modalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 border border-slate-200">
+          <div className="bg-white rounded-xl shadow-2xl max-w-xl w-full p-6 border border-slate-200 max-h-[95vh] overflow-y-auto">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
               <h3 className="font-bold text-slate-900 text-lg flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-odoo-500" /> Create Subscription / Quote
@@ -452,10 +456,12 @@ export const Subscriptions: React.FC = () => {
                 <select
                   value={customerId}
                   onChange={e => setCustomerId(Number(e.target.value))}
+                  required
                   className="w-full border border-slate-300 rounded-lg p-2 text-sm bg-white"
                 >
-                  <option value={3}>David Miller — Acme Corporation (acme@corp.com)</option>
-                  <option value={4}>Elena Rostova — Globex International (globex@biz.com)</option>
+                  {customers.map(c => (
+                    <option key={c.id} value={c.id}>{c.full_name}{c.company_name ? ` — ${c.company_name}` : ''} ({c.email})</option>
+                  ))}
                 </select>
               </div>
 
@@ -469,11 +475,85 @@ export const Subscriptions: React.FC = () => {
                 >
                   {plans.map(p => (
                     <option key={p.id} value={p.id}>
-                      {p.name} — ${p.price} / {p.billing_interval} {p.auto_close ? '(Auto-close on expiry)' : ''}
+                      {p.name} — {p.billing_interval}{p.min_quantity > 1 ? `, min qty ${p.min_quantity}` : ''}{p.auto_close ? ', auto-close' : ''}
                     </option>
                   ))}
                 </select>
               </div>
+
+              {/* Dates and payment terms */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Start date</label>
+                  <input type="date" required value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full border border-slate-300 rounded-lg p-2 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Expiry (optional)</label>
+                  <input type="date" value={expiryDate} min={startDate} onChange={e => setExpiryDate(e.target.value)} className="w-full border border-slate-300 rounded-lg p-2 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Payment terms</label>
+                  <select value={paymentTerms} onChange={e => setPaymentTerms(e.target.value)} className="w-full border border-slate-300 rounded-lg p-2 text-sm bg-white">
+                    {['Immediate Payment', '15 Days Net', '30 Days Net', '45 Days Net'].map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* Product lines (blank subscription only; a template brings its own lines) */}
+              {!selectedTemplateId && (
+                <div className="space-y-2">
+                  <label className="block text-xs font-semibold text-slate-700">Products</label>
+                  {lines.map((l, i) => {
+                    const product = products.find(p => p.id === l.product_id);
+                    return (
+                      <div key={i} className="grid grid-cols-12 gap-2 items-center">
+                        <select
+                          value={l.product_id}
+                          onChange={e => {
+                            const prod = products.find(p => p.id === Number(e.target.value));
+                            setLines(lines.map((x, j) => (j === i ? { product_id: Number(e.target.value), variant_id: prod?.variants?.[0]?.id ?? null, quantity: x.quantity } : x)));
+                          }}
+                          className="col-span-5 border border-slate-300 rounded-lg p-2 text-xs bg-white"
+                        >
+                          {products.map(p => <option key={p.id} value={p.id}>{p.name} — {formatMoney(p.sales_price)}</option>)}
+                        </select>
+                        <select
+                          value={l.variant_id ?? ''}
+                          disabled={!product?.variants?.length}
+                          onChange={e => setLines(lines.map((x, j) => (j === i ? { ...x, variant_id: e.target.value ? Number(e.target.value) : null } : x)))}
+                          className="col-span-4 border border-slate-300 rounded-lg p-2 text-xs bg-white disabled:bg-slate-50"
+                        >
+                          {!product?.variants?.length && <option value="">No variants</option>}
+                          {product?.variants?.map(v => (
+                            <option key={v.id} value={v.id}>{v.attribute_name}: {v.option_name}{v.price_extra ? ` (+${formatMoney(v.price_extra)})` : ''}</option>
+                          ))}
+                        </select>
+                        <input
+                          type="number"
+                          min={1}
+                          value={l.quantity}
+                          onChange={e => setLines(lines.map((x, j) => (j === i ? { ...x, quantity: Math.max(1, Number(e.target.value) || 1) } : x)))}
+                          className="col-span-2 border border-slate-300 rounded-lg p-2 text-xs"
+                          aria-label="Quantity"
+                        />
+                        <button
+                          type="button"
+                          disabled={lines.length === 1}
+                          onClick={() => setLines(lines.filter((_, j) => j !== i))}
+                          className="col-span-1 text-slate-400 hover:text-red-600 disabled:opacity-30"
+                          aria-label="Remove line"
+                        >✕</button>
+                      </div>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => products[0] && setLines([...lines, { product_id: products[0].id, variant_id: products[0].variants?.[0]?.id ?? null, quantity: 1 }])}
+                    className="text-xs font-semibold text-odoo-500 hover:underline"
+                  >+ Add product line</button>
+                  <p className="text-[11px] text-slate-500">The unit price (product price + variant extra) is fixed on the line when you save; later price changes do not alter it.</p>
+                </div>
+              )}
 
               {/* Discount Rule */}
               <div>
@@ -486,7 +566,7 @@ export const Subscriptions: React.FC = () => {
                   <option value="">No Discount Attached</option>
                   {discounts.map(d => (
                     <option key={d.id} value={d.id}>
-                      {d.code} — {d.description} ({d.value}{d.discount_type === 'percentage' ? '%' : '$'})
+                      {d.code} — {d.description} ({d.discount_type === 'percentage' ? `${d.value}%` : formatMoney(d.value)})
                     </option>
                   ))}
                 </select>
@@ -504,6 +584,8 @@ export const Subscriptions: React.FC = () => {
                 />
               </div>
 
+              {formError && <Alert kind="error">{formError}</Alert>}
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
@@ -514,8 +596,8 @@ export const Subscriptions: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-4 py-2 bg-odoo-500 hover:bg-odoo-600 text-white rounded-lg text-sm font-semibold shadow-sm transition-all"
+                  disabled={submitting || !customerId || !planId}
+                  className="px-4 py-2 bg-odoo-500 hover:bg-odoo-600 text-white rounded-lg text-sm font-semibold shadow-sm transition-all disabled:opacity-50"
                 >
                   {submitting ? 'Creating...' : 'Create Subscription'}
                 </button>

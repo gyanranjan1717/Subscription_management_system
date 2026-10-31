@@ -5,6 +5,16 @@ import {
 
 import type { PageInfo } from '../components/Pager.js';
 
+export interface IntegrityReport {
+  generatedAt: string;
+  ok: boolean;
+  duplicatePeriods: number;
+  missingPeriods: number;
+  inconsistentInvoiceTotals: number;
+  inconsistentPayments: number;
+  invalidReferences: number;
+}
+
 const API_BASE = '/api';
 
 export const DEMO_USERS = {
@@ -73,6 +83,10 @@ export const api = {
     return data;
   },
 
+  async me(): Promise<{ user: User }> {
+    return request('/auth/me');
+  },
+
   async register(body: { email: string; password: string; full_name: string; phone?: string; company_name?: string }): Promise<any> {
     return request('/auth/register', { method: 'POST', body: JSON.stringify(body) });
   },
@@ -87,6 +101,10 @@ export const api = {
 
   async createStaff(body: { email: string; password: string; full_name: string; phone?: string }): Promise<any> {
     return request('/auth/staff', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  async getCustomers(q?: string): Promise<{ customers: Array<{ id: number; email: string; full_name: string; company_name: string | null }> }> {
+    return request(`/auth/customers${q ? '?q=' + encodeURIComponent(q) : ''}`);
   },
 
   async getStaff(): Promise<{ staff: any[] }> {
@@ -135,9 +153,10 @@ export const api = {
   },
 
   // Subscriptions
-  async getSubscriptions(params?: { status?: string; customer_id?: number; page?: number }): Promise<{ subscriptions: Subscription[]; pagination: PageInfo }> {
+  async getSubscriptions(params?: { status?: string; customer_id?: number; page?: number; q?: string }): Promise<{ subscriptions: Subscription[]; pagination: PageInfo }> {
     const qs = new URLSearchParams();
     if (params?.page) qs.append('page', String(params.page));
+    if (params?.q) qs.append('q', params.q);
     if (params?.status && params.status !== 'All') qs.append('status', params.status);
     if (params?.customer_id) qs.append('customer_id', String(params.customer_id));
     const url = `/subscriptions${qs.toString() ? '?' + qs.toString() : ''}`;
@@ -165,21 +184,31 @@ export const api = {
   },
 
   // Billing
-  async runBillingCycle(as_of_date?: string): Promise<{ result: any }> {
-    return request('/billing/run', { method: 'POST', body: JSON.stringify({ as_of_date }) });
+  async runBillingCycle(opts: { as_of_date?: string; dry_run?: boolean; auto_confirm?: boolean } = {}): Promise<{ result: any }> {
+    return request('/billing/run', { method: 'POST', body: JSON.stringify(opts) });
+  },
+
+  async getIntegrityReport(): Promise<{ report: IntegrityReport }> {
+    return request('/billing/integrity');
+  },
+
+  async confirmDraftInvoices(): Promise<{ confirmed: number }> {
+    return request('/billing/invoices/confirm-drafts', { method: 'POST' });
   },
 
   async getBillingHistory(): Promise<{ history: any[] }> {
     return request('/billing/history');
   },
 
-  async getInvoices(params?: { status?: string; overdue?: boolean; page?: number }): Promise<{ invoices: Invoice[]; pagination: PageInfo }> {
+  async getInvoices(params?: { status?: string; overdue?: boolean; page?: number; q?: string; from?: string; to?: string }): Promise<{ invoices: Invoice[]; pagination: PageInfo }> {
     const qs = new URLSearchParams();
     if (params?.page) qs.append('page', String(params.page));
     if (params?.status && params.status !== 'All') qs.append('status', params.status);
     if (params?.overdue) qs.append('overdue', 'true');
-    const url = `/billing/invoices${qs.toString() ? '?' + qs.toString() : ''}`;
-    return request(url);
+    if (params?.q) qs.append('q', params.q);
+    if (params?.from) qs.append('from', params.from);
+    if (params?.to) qs.append('to', params.to);
+    return request(`/billing/invoices${qs.toString() ? '?' + qs.toString() : ''}`);
   },
 
   async getInvoice(id: number): Promise<{ invoice: Invoice }> {
@@ -195,18 +224,37 @@ export const api = {
   },
 
   // Payments
-  async getPayments(invoice_id?: number): Promise<{ payments: Payment[] }> {
-    const url = invoice_id ? `/payments?invoice_id=${invoice_id}` : '/payments';
-    return request(url);
+  async getPayments(params?: { invoice_id?: number; page?: number }): Promise<{ payments: Payment[]; pagination: PageInfo }> {
+    const qs = new URLSearchParams();
+    if (params?.invoice_id) qs.append('invoice_id', String(params.invoice_id));
+    if (params?.page) qs.append('page', String(params.page));
+    return request(`/payments${qs.toString() ? '?' + qs.toString() : ''}`);
   },
 
-  async recordPayment(body: { invoice_id: number; amount: number; payment_method: string; payment_date?: string; reference?: string; note?: string }): Promise<any> {
+  async recordPayment(body: { invoice_id: number; amount: number | string; payment_method: string; payment_date?: string; reference?: string; note?: string }): Promise<any> {
     return request('/payments', { method: 'POST', body: JSON.stringify(body) });
   },
 
   // Analytics
-  async getSummary(): Promise<{ metrics: DashboardMetrics; planBreakdown: any[]; overdueInvoices: any[]; recentEvents: any[] }> {
-    return request('/analytics/summary');
+  async getSummary(range?: { from?: string; to?: string }): Promise<{ metrics: DashboardMetrics; planBreakdown: any[]; overdueInvoices: any[]; recentEvents: any[] }> {
+    const qs = new URLSearchParams();
+    if (range?.from) qs.append('from', range.from);
+    if (range?.to) qs.append('to', range.to);
+    return request(`/analytics/summary${qs.toString() ? '?' + qs.toString() : ''}`);
+  },
+
+  /** Authenticated CSV download (a plain link would not carry the bearer token). */
+  async downloadCsv(kind: 'invoices' | 'subscriptions'): Promise<void> {
+    const response = await fetch(`${API_BASE}/analytics/export/${kind}`, {
+      headers: currentToken ? { Authorization: `Bearer ${currentToken}` } : {}
+    });
+    if (!response.ok) throw new Error(`Export failed (${response.status})`);
+    const url = URL.createObjectURL(await response.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `brightloop_${kind}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   },
 
   async getBenchmark(): Promise<any> {

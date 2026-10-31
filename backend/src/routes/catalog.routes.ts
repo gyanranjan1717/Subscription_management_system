@@ -122,6 +122,25 @@ catalogRouter.post('/taxes', adminWrite, handle((req, res) => {
   res.status(201).json({ success: true, message: 'Tax rule created successfully' });
 }));
 
+// Editing a rate affects invoices created afterwards only: issued invoices keep the rate they were billed with.
+catalogRouter.patch('/taxes/:id', adminWrite, handle((req, res) => {
+  const id = idParam(req.params.id);
+  const b = asBody(req.body);
+  const current = queryOne<{ id: number }>('SELECT id FROM tax_rules WHERE id = ?', [id]);
+  if (!current) throw notFound('Tax rule not found.');
+  runTransaction(() => {
+    if (b.name !== undefined) execute('UPDATE tax_rules SET name = ? WHERE id = ?', [reqStr(b, 'name', 120), id]);
+    if (b.rate_percentage !== undefined) execute('UPDATE tax_rules SET rate_percentage = ? WHERE id = ?', [percent(b, 'rate_percentage', { required: true }), id]);
+    if (b.is_active !== undefined) execute('UPDATE tax_rules SET is_active = ? WHERE id = ?', [bool(b, 'is_active', true) ? 1 : 0, id]);
+    if (b.is_default !== undefined && bool(b, 'is_default', false)) {
+      execute('UPDATE tax_rules SET is_default = 0');
+      execute('UPDATE tax_rules SET is_default = 1 WHERE id = ?', [id]);
+    }
+    audit('TAX_RULE_UPDATED', `Tax rule ${id} updated`, req.user!.id, { taxId: id });
+  });
+  res.json({ success: true, message: 'Tax rule updated' });
+}));
+
 // ---- Discount rules (admin-only creation) -----------------------------------------------------
 
 catalogRouter.get('/discounts', staffRead, handle((_req, res) => {

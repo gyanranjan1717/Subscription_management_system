@@ -9,29 +9,43 @@ import { Invoices } from './pages/Invoices.js';
 import { Catalog } from './pages/Catalog.js';
 import { CustomerPortal } from './pages/CustomerPortal.js';
 import { StaffManagement } from './pages/StaffManagement.js';
+import { Login } from './pages/Login.js';
 import { RefreshCw } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(getCurrentUser());
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [activeTab, setActiveTab] = useState<string>(() => (getCurrentUser()?.role === 'customer' ? 'portal' : 'dashboard'));
   const [targetInvoiceId, setTargetInvoiceId] = useState<number | null>(null);
   const [initializing, setInitializing] = useState(true);
 
-  // Auto-login as Admin on first load if no token exists
+  // A stored session is re-validated against the server; an expired or revoked token sends the user back to sign-in.
   useEffect(() => {
-    const initAuth = async () => {
-      if (!getCurrentUser()) {
+    const check = async () => {
+      if (getCurrentUser()) {
         try {
-          const res = await api.login(DEMO_USERS.admin.email, DEMO_USERS.admin.password);
-          setCurrentUser(res.user);
-        } catch (err) {
-          console.error('Auto login failed', err);
+          const me = await api.me();
+          setCurrentUser(me.user);
+        } catch {
+          setSession(null, null);
+          setCurrentUser(null);
         }
       }
       setInitializing(false);
     };
-    initAuth();
+    check();
   }, []);
+
+  const startPage = (user: User) => (user.role === 'customer' ? 'portal' : 'dashboard');
+
+  const handleLoggedIn = (user: User) => {
+    setCurrentUser(user);
+    setActiveTab(startPage(user));
+  };
+
+  const handleLogout = () => {
+    setSession(null, null);
+    setCurrentUser(null);
+  };
 
   const handleSwitchPersona = async (key: keyof typeof DEMO_USERS) => {
     const creds = DEMO_USERS[key];
@@ -39,13 +53,9 @@ export const App: React.FC = () => {
       const res = await api.login(creds.email, creds.password);
       setCurrentUser(res.user);
       // If switched to a customer, take them directly to customer portal to demonstrate data isolation
-      if (res.user.role === 'customer') {
-        setActiveTab('portal');
-      } else {
-        setActiveTab('dashboard');
-      }
+      setActiveTab(startPage(res.user));
     } catch (err: any) {
-      alert('Persona switch error: ' + err.message);
+      console.error('Persona switch failed', err);
     }
   };
 
@@ -69,6 +79,10 @@ export const App: React.FC = () => {
     );
   }
 
+  if (!currentUser) {
+    return <Login onLoggedIn={handleLoggedIn} />;
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
       <Navbar
@@ -77,23 +91,24 @@ export const App: React.FC = () => {
         setActiveTab={setActiveTab}
         onSwitchPersona={handleSwitchPersona}
         onRefresh={handleRefresh}
+        onLogout={handleLogout}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {activeTab === 'dashboard' && (
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        {activeTab === 'dashboard' && currentUser?.role !== 'customer' && (
           <Dashboard
             onNavigateToInvoice={handleNavigateToInvoice}
             onNavigateToBilling={() => setActiveTab('billing')}
           />
         )}
 
-        {activeTab === 'subscriptions' && <Subscriptions />}
+        {activeTab === 'subscriptions' && currentUser?.role !== 'customer' && <Subscriptions />}
 
-        {activeTab === 'billing' && <BillingRun />}
+        {activeTab === 'billing' && currentUser?.role !== 'customer' && <BillingRun />}
 
-        {activeTab === 'invoices' && <Invoices initialInvoiceId={targetInvoiceId} />}
+        {activeTab === 'invoices' && <Invoices key={currentUser?.id} initialInvoiceId={targetInvoiceId} />}
 
-        {activeTab === 'catalog' && (
+        {activeTab === 'catalog' && currentUser?.role !== 'customer' && (
           <Catalog
             currentUser={currentUser}
             onSelectTemplate={() => setActiveTab('subscriptions')}

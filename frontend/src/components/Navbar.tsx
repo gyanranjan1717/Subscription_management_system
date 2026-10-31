@@ -12,6 +12,7 @@ interface NavbarProps {
   setActiveTab: (tab: string) => void;
   onSwitchPersona: (personaKey: keyof typeof DEMO_USERS) => void;
   onRefresh: () => void;
+  onLogout: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -19,7 +20,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
   onSwitchPersona,
-  onRefresh
+  onRefresh,
+  onLogout
 }) => {
   const [switching, setSwitching] = useState(false);
 
@@ -28,6 +30,18 @@ export const Navbar: React.FC<NavbarProps> = ({
     await onSwitchPersona(key);
     setSwitching(false);
   };
+
+  type Tab = { id: string; label: string; icon: React.ComponentType<{ className?: string }>; roles: Array<User['role']> };
+  const TABS: Tab[] = [
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'staff'] },
+    { id: 'catalog', label: 'Catalog & Rules', icon: Package, roles: ['admin', 'staff'] },
+    { id: 'subscriptions', label: 'Subscriptions', icon: FileText, roles: ['admin', 'staff'] },
+    { id: 'billing', label: 'Billing Run', icon: PlayCircle, roles: ['admin', 'staff'] },
+    { id: 'invoices', label: 'Invoices & Payments', icon: CreditCard, roles: ['admin', 'staff', 'customer'] },
+    { id: 'portal', label: 'Customer Portal', icon: ShieldCheck, roles: ['admin', 'staff', 'customer'] },
+    { id: 'staff', label: 'Staff Admin', icon: UserCheck, roles: ['admin'] }
+  ];
+  const visibleTabs = TABS.filter(t => !currentUser || t.roles.includes(currentUser.role));
 
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-50 shadow-md">
@@ -80,83 +94,32 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Navigation Links */}
-          <nav className="hidden md:flex items-center space-x-1">
-            <button
-              onClick={() => setActiveTab('dashboard')}
-              className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'dashboard' ? 'bg-odoo-500 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <LayoutDashboard className="w-4 h-4" />
-              <span>Dashboard</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('subscriptions')}
-              className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'subscriptions' ? 'bg-odoo-500 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <FileText className="w-4 h-4" />
-              <span>Subscriptions</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('billing')}
-              className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'billing' ? 'bg-odoo-500 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <PlayCircle className="w-4 h-4" />
-              <span>Billing Run Engine</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('invoices')}
-              className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'invoices' ? 'bg-odoo-500 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <CreditCard className="w-4 h-4" />
-              <span>Invoices & Payments</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('catalog')}
-              className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'catalog' ? 'bg-odoo-500 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <Package className="w-4 h-4" />
-              <span>Catalog & Rules</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('portal')}
-              className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                activeTab === 'portal' ? 'bg-odoo-teal text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-              }`}
-            >
-              <ShieldCheck className="w-4 h-4" />
-              <span>Customer Portal</span>
-            </button>
-
-            {currentUser?.role === 'admin' && (
+          {/* Navigation Links (desktop). Each role only sees the pages it may use; the server enforces it anyway. */}
+          <nav className="hidden lg:flex items-center space-x-1" aria-label="Main">
+            {visibleTabs.map(t => (
               <button
-                onClick={() => setActiveTab('staff')}
+                key={t.id}
+                onClick={() => setActiveTab(t.id)}
                 className={`flex items-center space-x-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                  activeTab === 'staff' ? 'bg-odoo-500 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                  activeTab === t.id ? (t.id === 'portal' ? 'bg-odoo-teal text-white' : 'bg-odoo-500 text-white') : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                 }`}
               >
-                <UserCheck className="w-4 h-4" />
-                <span>Staff Admin</span>
+                <t.icon className="w-4 h-4" />
+                <span>{t.label}</span>
               </button>
-            )}
+            ))}
           </nav>
 
           {/* User profile & Refresh */}
           <div className="flex items-center space-x-3">
+            <button
+              onClick={onLogout}
+              title="Sign out"
+              aria-label="Sign out"
+              className="p-2 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
             <button
               onClick={onRefresh}
               title="Refresh Data"
@@ -171,6 +134,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Navigation (small screens): scrollable row so every page stays reachable */}
+        <nav className="lg:hidden flex gap-1 overflow-x-auto pb-2" aria-label="Main (mobile)">
+          {visibleTabs.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap ${
+                activeTab === t.id ? 'bg-odoo-500 text-white' : 'text-slate-300 bg-slate-800'
+              }`}
+            >
+              <t.icon className="w-3.5 h-3.5" />
+              {t.label}
+            </button>
+          ))}
+        </nav>
       </div>
     </header>
   );

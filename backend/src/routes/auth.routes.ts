@@ -167,6 +167,18 @@ authRouter.get('/staff', authenticate, requireRole('admin', 'staff'), (_req: Req
   res.json({ success: true, staff });
 });
 
+// Customers, for the "new subscription" form (staff and admin). Prefix search on name/email, capped list.
+authRouter.get('/customers', authenticate, requireRole('admin', 'staff'), (req: Request, res: Response): void => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase().replace(/[%_\\]/g, '') : '';
+  const customers = queryAll(
+    `SELECT id, email, full_name, company_name FROM users
+     WHERE role = 'customer' AND active = 1 AND (? = '' OR lower(email) LIKE ? OR lower(full_name) LIKE ? OR lower(COALESCE(company_name, '')) LIKE ?)
+     ORDER BY full_name LIMIT 100`,
+    [q, `${q}%`, `${q}%`, `${q}%`]
+  );
+  res.json({ success: true, customers });
+});
+
 // Dev mailbox: every email the system "sent". Admin only, never in production.
 authRouter.get('/outbox', authenticate, requireRole('admin'), (_req: Request, res: Response): void => {
   if (process.env.NODE_ENV === 'production') {

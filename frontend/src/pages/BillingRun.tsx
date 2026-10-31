@@ -1,217 +1,310 @@
 import React, { useState, useEffect } from 'react';
-import { api } from '../services/api.js';
-import {
-  PlayCircle, CheckCircle2, ShieldCheck, AlertCircle, Clock,
-  Calendar, DollarSign, Layers, ArrowRight, RefreshCw, Zap
-} from 'lucide-react';
+import { api, IntegrityReport } from '../services/api.js';
+import { Alert, EmptyState, Loading } from '../components/ui.js';
+import { formatMoney, today } from '../lib/format.js';
+import { PlayCircle, ShieldCheck, ShieldAlert, Clock, Calendar, RefreshCw, Eye, CheckCheck } from 'lucide-react';
+
+interface RunRecord {
+  n: number;
+  at: string;
+  asOf: string;
+  created: number;
+  already: number;
+  errors: number;
+  total: number;
+}
+
+const DETAIL_ROWS_SHOWN = 100;
 
 export const BillingRun: React.FC = () => {
-  const [asOfDate, setAsOfDate] = useState<string>(new Date().toISOString().split('T')[0]);
-  const [running, setRunning] = useState(false);
+  const [asOfDate, setAsOfDate] = useState<string>(today());
+  const [autoConfirm, setAutoConfirm] = useState(false);
+  const [busy, setBusy] = useState<null | 'run' | 'dry' | 'confirm' | 'integrity'>(null);
   const [lastResult, setLastResult] = useState<any | null>(null);
+  const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [integrity, setIntegrity] = useState<IntegrityReport | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const loadHistory = async () => {
     setHistoryLoading(true);
     try {
-      const res = await api.getBillingHistory();
-      setHistory(res.history);
+      setHistory((await api.getBillingHistory()).history);
     } catch (err: any) {
-      console.error('Error loading billing history', err);
+      setError('Could not load billing history: ' + err.message);
     } finally {
       setHistoryLoading(false);
     }
   };
 
-  useEffect(() => {
-    loadHistory();
-  }, []);
-
-  const handleRunBilling = async () => {
-    setRunning(true);
+  const loadIntegrity = async () => {
+    setBusy(b => b ?? 'integrity');
     try {
-      const res = await api.runBillingCycle(asOfDate);
-      setLastResult(res.result);
-      loadHistory();
+      setIntegrity((await api.getIntegrityReport()).report);
     } catch (err: any) {
-      alert('Billing execution error: ' + err.message);
+      setError('Could not load the integrity report: ' + err.message);
     } finally {
-      setRunning(false);
+      setBusy(b => (b === 'integrity' ? null : b));
     }
   };
 
+  useEffect(() => {
+    loadHistory();
+    loadIntegrity();
+  }, []);
+
+  const execute = async (dryRun: boolean) => {
+    setError(null);
+    setNotice(null);
+    setBusy(dryRun ? 'dry' : 'run');
+    try {
+      const { result } = await api.runBillingCycle({ as_of_date: asOfDate, dry_run: dryRun, auto_confirm: autoConfirm });
+      setLastResult(result);
+      if (!dryRun) {
+        setRuns(prev => [
+          ...prev,
+          {
+            n: prev.length + 1,
+            at: new Date().toLocaleTimeString(),
+            asOf: result.asOfDate,
+            created: result.invoicesCreated,
+            already: result.skippedDuplicates,
+            errors: result.errors,
+            total: result.totalBilledAmount
+          }
+        ]);
+        loadHistory();
+        loadIntegrity();
+      }
+    } catch (err: any) {
+      setError('Billing failed: ' + err.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmDrafts = async () => {
+    if (!window.confirm('Confirm every Draft invoice? Confirmed invoices can be sent and paid.')) return;
+    setBusy('confirm');
+    setError(null);
+    try {
+      const r = await api.confirmDraftInvoices();
+      setNotice(`${r.confirmed} draft invoice(s) confirmed.`);
+    } catch (err: any) {
+      setError('Could not confirm drafts: ' + err.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const integrityCards: Array<[string, number]> = integrity
+    ? [
+        ['Duplicate periods', integrity.duplicatePeriods],
+        ['Missing periods', integrity.missingPeriods],
+        ['Invoice total mismatches', integrity.inconsistentInvoiceTotals],
+        ['Payment mismatches', integrity.inconsistentPayments],
+        ['Invalid references', integrity.invalidReferences]
+      ]
+    : [];
+
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {/* Controls */}
+      <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Recurring Billing Engine Control Center</h1>
-            <span className="px-2.5 py-0.5 rounded text-xs font-bold bg-odoo-500 text-white">
-              Automated Batch Processing
-            </span>
-          </div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Billing Run</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Executes automated recurring invoicing with strict database uniqueness guarantees: <strong>never double-bills or skips a period</strong>.
+            Every due period of every Active subscription is invoiced exactly once. Run it twice: the second run creates 0 invoices.
           </p>
         </div>
 
-        {/* Date Selector & Trigger Button */}
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
+          <label className="flex items-center gap-1.5 bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
             <Calendar className="w-4 h-4 text-slate-500" />
+            <span className="text-slate-500 text-xs">Bill as of</span>
             <input
               type="date"
               value={asOfDate}
               onChange={e => setAsOfDate(e.target.value)}
               className="bg-transparent text-slate-800 font-semibold focus:outline-none"
             />
-          </div>
+          </label>
+
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={autoConfirm} onChange={e => setAutoConfirm(e.target.checked)} />
+            Create invoices as Confirmed
+          </label>
 
           <button
-            onClick={handleRunBilling}
-            disabled={running}
-            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center gap-2 disabled:opacity-50"
+            onClick={() => execute(true)}
+            disabled={busy !== null || !asOfDate}
+            className="px-4 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 rounded-lg text-sm font-semibold flex items-center gap-2 disabled:opacity-50"
           >
-            {running ? (
-              <>
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                Processing Cycles...
-              </>
-            ) : (
-              <>
-                <PlayCircle className="w-4 h-4" />
-                Execute Billing Cycle
-              </>
-            )}
+            <Eye className="w-4 h-4" /> {busy === 'dry' ? 'Previewing…' : 'Preview (saves nothing)'}
+          </button>
+
+          <button
+            onClick={() => execute(false)}
+            disabled={busy !== null || !asOfDate}
+            className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-bold shadow-sm flex items-center gap-2 disabled:opacity-50"
+          >
+            {busy === 'run' ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PlayCircle className="w-4 h-4" />}
+            {busy === 'run' ? 'Billing…' : 'Run billing'}
+          </button>
+
+          <button
+            onClick={confirmDrafts}
+            disabled={busy !== null}
+            className="px-4 py-2 border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-800 rounded-lg text-sm font-semibold flex items-center gap-2 disabled:opacity-50"
+          >
+            <CheckCheck className="w-4 h-4" /> Confirm all drafts
           </button>
         </div>
       </div>
 
-      {/* Idempotency Trap Callout / Result Banner */}
-      {lastResult && (
-        <div className={`p-6 rounded-xl border shadow-sm transition-all ${
-          lastResult.invoicesCreated > 0
-            ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
-            : 'bg-blue-50 border-blue-300 text-blue-950'
-        }`}>
-          <div className="flex items-start justify-between">
-            <div className="flex items-center gap-3">
-              {lastResult.invoicesCreated > 0 ? (
-                <div className="p-3 bg-emerald-600 text-white rounded-xl shadow-md">
-                  <CheckCircle2 className="w-6 h-6" />
+      {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert kind="success" onClose={() => setNotice(null)}>{notice}</Alert>}
+
+      {/* Run comparison: first run vs repeat run */}
+      {runs.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-6">
+          <h2 className="font-bold text-slate-900 text-base mb-3">Runs in this session</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {runs.map(r => (
+              <div
+                key={r.n}
+                className={`rounded-lg border p-4 ${r.created > 0 ? 'bg-emerald-50 border-emerald-300' : 'bg-blue-50 border-blue-300'}`}
+              >
+                <div className="text-xs font-semibold text-slate-500">
+                  Run {r.n} · {r.at} · as of {r.asOf}
                 </div>
-              ) : (
-                <div className="p-3 bg-blue-600 text-white rounded-xl shadow-md">
-                  <ShieldCheck className="w-6 h-6" />
+                <div className="text-3xl font-black text-slate-900 mt-1">{r.created}</div>
+                <div className="text-sm font-semibold text-slate-700">invoices created</div>
+                <div className="text-xs text-slate-600 mt-2">
+                  Already billed (skipped): <strong>{r.already}</strong> · Errors: <strong>{r.errors}</strong> · Value:{' '}
+                  <strong>{formatMoney(r.total)}</strong>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Latest result details */}
+      {lastResult && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className={`px-4 sm:px-6 py-3 text-sm font-bold ${lastResult.dryRun ? 'bg-amber-100 text-amber-900' : 'bg-slate-900 text-white'}`}>
+            {lastResult.dryRun ? 'PREVIEW — nothing was saved' : 'Latest run'} · as of {lastResult.asOfDate} · {lastResult.processedCount} due subscription(s) ·{' '}
+            {lastResult.invoicesCreated} invoice(s) · {formatMoney(lastResult.totalBilledAmount)}
+          </div>
+          {lastResult.details.length === 0 ? (
+            <EmptyState title="Nothing was due" hint="Every Active subscription is already billed up to this date." />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                  <tr>
+                    <th className="px-4 py-2">Subscription</th>
+                    <th className="px-4 py-2">Period start</th>
+                    <th className="px-4 py-2">Invoice</th>
+                    <th className="px-4 py-2 text-right">Amount</th>
+                    <th className="px-4 py-2">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {lastResult.details.slice(0, DETAIL_ROWS_SHOWN).map((d: any, i: number) => (
+                    <tr key={i}>
+                      <td className="px-4 py-2 font-semibold">{d.subscriptionNumber}</td>
+                      <td className="px-4 py-2 font-mono">{d.periodStart ?? '—'}</td>
+                      <td className="px-4 py-2 font-mono">{d.invoiceNumber ?? '—'}</td>
+                      <td className="px-4 py-2 text-right font-mono">{d.amount !== undefined ? formatMoney(d.amount) : '—'}</td>
+                      <td className="px-4 py-2">
+                        <span
+                          className={`px-2 py-0.5 rounded font-semibold ${
+                            d.status === 'created' ? 'bg-emerald-100 text-emerald-800'
+                            : d.status === 'already_billed' ? 'bg-blue-100 text-blue-800'
+                            : d.status === 'error' ? 'bg-red-100 text-red-800'
+                            : 'bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          {d.status === 'created' ? 'Created' : d.status === 'already_billed' ? 'Already billed' : d.status === 'auto_closed' ? 'Auto-closed' : 'Error'}
+                        </span>
+                        {d.reason && <span className="ml-2 text-slate-500">{d.reason}</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {lastResult.details.length > DETAIL_ROWS_SHOWN && (
+                <div className="px-4 py-2 text-xs text-slate-500 border-t border-slate-100">
+                  Showing the first {DETAIL_ROWS_SHOWN} of {lastResult.details.length} rows.
                 </div>
               )}
-              <div>
-                <h3 className="text-lg font-bold">
-                  {lastResult.invoicesCreated > 0
-                    ? `Billing Cycle Completed — ${lastResult.invoicesCreated} Invoices Generated`
-                    : `Zero Duplicate Invoices Created — Idempotency Constraint Verified!`}
-                </h3>
-                <p className="text-xs opacity-90 mt-0.5">
-                  As of date: <strong>{lastResult.asOfDate}</strong> | Processed: {lastResult.processedCount} subscriptions
-                </p>
-              </div>
-            </div>
-
-            <div className="text-right">
-              <div className="text-2xl font-black">
-                ${Number(lastResult.totalBilledAmount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-              </div>
-              <div className="text-xs font-semibold opacity-80">Total Value Invoiced</div>
-            </div>
-          </div>
-
-          {/* Metrics Pills */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 pt-4 border-t border-slate-200/60">
-            <div className="bg-white/80 p-3 rounded-lg border border-slate-200/60">
-              <div className="text-xs text-slate-500 font-semibold uppercase">New Invoices Created</div>
-              <div className="text-xl font-bold text-slate-900">{lastResult.invoicesCreated}</div>
-            </div>
-            <div className="bg-white/80 p-3 rounded-lg border border-slate-200/60">
-              <div className="text-xs text-slate-500 font-semibold uppercase">Skipped Duplicates (Safe)</div>
-              <div className="text-xl font-bold text-blue-600">{lastResult.skippedDuplicates}</div>
-            </div>
-            <div className="bg-white/80 p-3 rounded-lg border border-slate-200/60">
-              <div className="text-xs text-slate-500 font-semibold uppercase">Double Billing Risk</div>
-              <div className="text-xl font-bold text-emerald-600 flex items-center gap-1">
-                <ShieldCheck className="w-5 h-5 text-emerald-600" /> 0% (Guaranteed)
-              </div>
-            </div>
-          </div>
-
-          {/* Details Table */}
-          {lastResult.details && lastResult.details.length > 0 && (
-            <div className="mt-4 bg-white rounded-lg border border-slate-200 overflow-hidden">
-              <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700">
-                Processed Subscriptions & Actions
-              </div>
-              <div className="divide-y divide-slate-100 max-h-60 overflow-y-auto text-xs">
-                {lastResult.details.map((item: any, idx: number) => (
-                  <div key={idx} className="px-4 py-2.5 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold text-slate-900">{item.subscriptionNumber}</span>
-                      {item.invoiceNumber && (
-                        <span className="text-odoo-500 font-mono font-medium">→ {item.invoiceNumber}</span>
-                      )}
-                      {item.reason && <span className="text-slate-500">({item.reason})</span>}
-                    </div>
-                    <div className="flex items-center gap-3">
-                      {item.amount && <span className="font-bold text-slate-900">${item.amount.toFixed(2)}</span>}
-                      <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                        item.status === 'created'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : item.status === 'already_billed'
-                          ? 'bg-blue-100 text-blue-800'
-                          : 'bg-slate-100 text-slate-700'
-                      }`}>
-                        {item.status === 'created' ? 'Created' : item.status === 'already_billed' ? 'Already Billed' : item.status}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Prior Billing Runs Audit History */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-        <h3 className="font-bold text-slate-900 text-base mb-1 flex items-center gap-2">
-          <Clock className="w-5 h-5 text-slate-500" /> Billing Run Engine Audit History
-        </h3>
-        <p className="text-xs text-slate-500 mb-4">
-          Complete audit trail of every automated and manual billing execution for compliance and accounting reconciliation.
-        </p>
+      {/* Integrity report: live from the database */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h2 className="font-bold text-slate-900 text-base flex items-center gap-2">
+            {integrity?.ok === false ? <ShieldAlert className="w-5 h-5 text-red-600" /> : <ShieldCheck className="w-5 h-5 text-emerald-600" />}
+            Billing integrity report
+          </h2>
+          <button
+            onClick={loadIntegrity}
+            disabled={busy !== null}
+            className="px-3 py-1.5 text-xs font-semibold border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50"
+          >
+            {busy === 'integrity' ? 'Checking…' : 'Re-check now'}
+          </button>
+        </div>
+        {!integrity ? (
+          <Loading label="Checking the ledger…" />
+        ) : (
+          <>
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+              {integrityCards.map(([label, n]) => (
+                <div key={label} className={`rounded-lg border p-3 ${n === 0 ? 'border-emerald-300 bg-emerald-50' : 'border-red-300 bg-red-50'}`}>
+                  <div className="text-[11px] font-semibold uppercase text-slate-500">{label}</div>
+                  <div className={`text-2xl font-black ${n === 0 ? 'text-emerald-700' : 'text-red-700'}`}>{n}</div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-slate-500 mt-3">
+              {integrity.ok ? 'Ledger is consistent. ' : 'Problems found — see the counts above. '}
+              Checked {new Date(integrity.generatedAt).toLocaleString()} against the live database.
+            </p>
+          </>
+        )}
+      </div>
 
+      {/* Audit history */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-6">
+        <h2 className="font-bold text-slate-900 text-base mb-3 flex items-center gap-2">
+          <Clock className="w-5 h-5 text-slate-500" /> Billing run history
+        </h2>
         {historyLoading ? (
-          <div className="text-center py-6 text-slate-400">Loading audit log...</div>
+          <Loading label="Loading history…" />
         ) : history.length > 0 ? (
           <div className="divide-y divide-slate-100">
             {history.map((h: any) => (
-              <div key={h.id} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+              <div key={h.id} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-xs">
                 <div>
                   <div className="font-semibold text-slate-800">{h.description}</div>
-                  <div className="text-slate-400 text-[11px]">
-                    Executed by: <span className="text-slate-600 font-medium">{h.operator_name || 'System Scheduler'}</span> on {h.created_at}
+                  <div className="text-slate-400">
+                    By {h.operator_name || 'System'} · {h.created_at}
                   </div>
                 </div>
-                <span className="px-2.5 py-1 rounded bg-slate-100 text-slate-700 font-mono font-semibold self-start sm:self-auto">
-                  Audit #{h.id}
-                </span>
+                <span className="px-2 py-1 rounded bg-slate-100 text-slate-700 font-mono font-semibold self-start">Audit #{h.id}</span>
               </div>
             ))}
           </div>
         ) : (
-          <div className="text-center py-8 text-slate-400 text-sm">
-            No previous billing runs recorded. Click "Execute Billing Cycle" above to run the engine!
-          </div>
+          <EmptyState title="No billing runs yet" hint="Use Run billing above to create the first invoices." />
         )}
       </div>
     </div>

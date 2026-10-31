@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api.js';
-import { Subscription, Invoice, User } from '../types.js';
+import { Subscription, Invoice, Payment, User } from '../types.js';
+import { Alert, EmptyState, Loading, StatusBadge } from '../components/ui.js';
+import { formatMoney } from '../lib/format.js';
 import {
   ShieldCheck, Eye, KeyRound, AlertCircle, CheckCircle2,
   Lock, RefreshCw, Printer, XCircle, PauseCircle, PlayCircle, History
@@ -15,6 +17,8 @@ interface CustomerPortalProps {
 export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onViewInvoice }) => {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [timelineSubId, setTimelineSubId] = useState<number | null>(null);
@@ -29,17 +33,20 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
   const loadData = async () => {
     setLoading(true);
     try {
-      const [subRes, invRes] = await Promise.all([
+      const [subRes, invRes, payRes] = await Promise.all([
         api.getSubscriptions(),
-        api.getInvoices()
+        api.getInvoices(),
+        api.getPayments()
       ]);
       setSubscriptions(subRes.subscriptions);
       setInvoices(invRes.invoices);
+      setPayments(payRes.payments);
+      setError(null);
       if (currentUser?.email) {
         setResetEmail(currentUser.email);
       }
     } catch (err: any) {
-      console.error('Error loading portal data', err);
+      setError('Could not load your account data: ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -56,7 +63,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
       setTimeout(() => setActionNotice(null), 4000);
       loadData();
     } catch (err: any) {
-      alert('Cannot pause: ' + err.message);
+      setError('Cannot pause: ' + err.message);
     }
   };
 
@@ -67,7 +74,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
       setTimeout(() => setActionNotice(null), 4000);
       loadData();
     } catch (err: any) {
-      alert('Cannot resume: ' + err.message);
+      setError('Cannot resume: ' + err.message);
     }
   };
 
@@ -78,7 +85,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
       setTimeout(() => setActionNotice(null), 4000);
       loadData();
     } catch (err: any) {
-      alert('Renewal failed: ' + err.message);
+      setError('Renewal failed: ' + err.message);
     }
   };
 
@@ -90,7 +97,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
       setTimeout(() => setActionNotice(null), 4000);
       loadData();
     } catch (err: any) {
-      alert('Cannot cancel: ' + err.message);
+      setError('Cannot cancel: ' + err.message);
     }
   };
 
@@ -98,22 +105,28 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
     e.preventDefault();
     try {
       const res = await api.forgotPassword(resetEmail);
-      setResetToken(res.resetToken);
+      setError(null);
       setResetStep('reset');
-      setResetResult(`Reset link generated! Simulated email dispatched to ${resetEmail} with token: ${res.resetToken}`);
+      if (res.resetToken) {
+        setResetToken(res.resetToken);
+        setResetResult(`A reset link was sent to ${resetEmail} (development mode shows the token here so you can paste it below).`);
+      } else {
+        setResetResult(`If ${resetEmail} is registered, a reset link has been sent to it. Paste the token from that email below.`);
+      }
     } catch (err: any) {
-      alert('Reset request failed: ' + err.message);
+      setError('Reset request failed: ' + err.message);
     }
   };
 
   const handleExecuteReset = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await api.resetPassword(resetToken, newPassword);
-      setResetResult('Password reset successfully! Meets rule: >8 chars with upper, lower, special.');
+      await api.resetPassword(resetToken, newPassword);
+      setError(null);
+      setResetResult('Password updated. You can now log in with the new password.');
       setNewPassword('');
     } catch (err: any) {
-      alert('Password reset failed: ' + err.message);
+      setError('Password reset failed: ' + err.message);
     }
   };
 
@@ -136,26 +149,27 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
           </p>
         </div>
 
-        {!isCustomerRole && (
+        {isCustomerRole ? (
+          <div className="text-xs bg-emerald-50 text-emerald-900 border border-emerald-200 px-3 py-1.5 rounded-lg">
+            Account <strong>{currentUser?.email}</strong>: {subscriptions.length} subscription(s), {invoices.length} invoice(s), {payments.length} payment(s)
+          </div>
+        ) : (
           <div className="text-xs bg-amber-50 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-lg">
-            (Viewing in Admin/Staff mode. Use top Persona Switcher to switch to Acme Corp or Globex Inc to test 100% tenant isolation!)
+            Viewing as {currentUser?.role}. Switch to a customer persona to see the isolated portal.
           </div>
         )}
       </div>
 
-      {actionNotice && (
-        <div className="bg-emerald-50 border border-emerald-300 text-emerald-950 px-4 py-3 rounded-lg text-sm flex items-center justify-between shadow-sm">
-          <span>{actionNotice}</span>
-          <button onClick={() => setActionNotice(null)} className="text-emerald-800 font-bold">×</button>
-        </div>
-      )}
+      {error && <Alert kind="error" onClose={() => setError(null)}>{error}</Alert>}
+      {actionNotice && <Alert kind="success" onClose={() => setActionNotice(null)}>{actionNotice}</Alert>}
+      {loading && <Loading label="Loading your account…" />}
 
       {/* Customer Subscriptions */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden p-6 space-y-4">
         <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-          <h2 className="font-bold text-slate-900 text-base">Your Active Subscriptions</h2>
+          <h2 className="font-bold text-slate-900 text-base">Your Subscriptions</h2>
           <span className="text-xs font-semibold px-2.5 py-0.5 bg-slate-100 text-slate-700 rounded-full">
-            {subscriptions.length} active with your account
+            {subscriptions.length} on your account
           </span>
         </div>
 
@@ -169,12 +183,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                     <h3 className="font-bold text-slate-900 text-base">{s.plan_name}</h3>
                     <div className="text-xs text-slate-400 capitalize">{s.billing_interval} interval</div>
                   </div>
-                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                    s.status === 'Active' ? 'bg-emerald-100 text-emerald-800' :
-                    s.status === 'Paused' ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-800'
-                  }`}>
-                    {s.status}
-                  </span>
+                  <StatusBadge status={s.status} />
                 </div>
 
                 <div className="text-xs space-y-1 text-slate-600 border-t border-slate-200/60 pt-2">
@@ -189,7 +198,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                   {s.discount_code && (
                     <div className="flex justify-between text-purple-700 font-medium">
                       <span>Discount Benefit:</span>
-                      <span>{s.discount_code} ({s.discount_value}{s.discount_type === 'percentage' ? '%' : '$'} off)</span>
+                      <span>{s.discount_code} ({s.discount_type === 'percentage' ? `${s.discount_value}%` : formatMoney(s.discount_value)} off)</span>
                     </div>
                   )}
                 </div>
@@ -226,7 +235,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                   >
                     <History className="w-3.5 h-3.5" /> {timelineSubId === s.id ? 'Hide Activity' : 'Activity'}
                   </button>
-                  {s.status !== 'Closed' && (
+                  {s.status !== 'Closed' && s.can_close_early !== 0 && (
                     <button
                       onClick={() => handleClose(s.id)}
                       className="px-3 py-1 bg-red-50 hover:bg-red-100 text-red-700 rounded text-xs font-semibold flex items-center gap-1 ml-auto"
@@ -248,9 +257,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
             ))}
           </div>
         ) : (
-          <div className="text-center py-8 text-slate-400 text-sm">
-            No subscriptions found under this account.
-          </div>
+          !loading && <EmptyState title="No subscriptions on this account" hint="Your sales contact will set one up for you." />
         )}
       </div>
 
@@ -271,7 +278,9 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                   <th className="px-4 py-3">Invoice #</th>
                   <th className="px-4 py-3">Period</th>
                   <th className="px-4 py-3">Due Date</th>
-                  <th className="px-4 py-3 text-right">Amount</th>
+                  <th className="px-4 py-3 text-right">Total</th>
+                  <th className="px-4 py-3 text-right">Paid</th>
+                  <th className="px-4 py-3 text-right">Outstanding</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3 text-right">Action</th>
                 </tr>
@@ -282,13 +291,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                     <td className="px-4 py-3 font-semibold text-odoo-500 font-mono">{inv.invoice_number}</td>
                     <td className="px-4 py-3 font-mono">{inv.period_start} → {inv.period_end}</td>
                     <td className="px-4 py-3 text-slate-600">{inv.due_date}</td>
-                    <td className="px-4 py-3 text-right font-bold font-mono text-slate-900">${inv.total_amount.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-right font-bold font-mono text-slate-900">{formatMoney(inv.total_amount)}</td>
+                    <td className="px-4 py-3 text-right font-mono text-emerald-700">{formatMoney(inv.amount_paid)}</td>
+                    <td className="px-4 py-3 text-right font-mono text-amber-700">{inv.status === 'Cancelled' ? '—' : formatMoney(inv.balance_due ?? inv.total_amount - inv.amount_paid)}</td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded font-bold ${
-                        inv.status === 'Paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
-                      }`}>
-                        {inv.status}
-                      </span>
+                      <StatusBadge status={inv.status} overdue={!!inv.is_overdue} partial={inv.amount_paid > 0 && inv.amount_paid < inv.total_amount} />
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button
@@ -304,7 +311,41 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
             </table>
           </div>
         ) : (
-          <div className="text-center py-6 text-slate-400 text-sm">No invoices on file yet.</div>
+          !loading && <EmptyState title="No invoices yet" hint="Invoices appear after your subscription is billed." />
+        )}
+      </div>
+
+      {/* Customer Payments */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4">
+        <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+          <h2 className="font-bold text-slate-900 text-base">Your Payments</h2>
+          <span className="text-xs font-semibold px-2.5 py-0.5 bg-slate-100 text-slate-700 rounded-full">{payments.length} payments</span>
+        </div>
+        {payments.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                <tr>
+                  <th className="px-4 py-2">Date</th>
+                  <th className="px-4 py-2">Invoice</th>
+                  <th className="px-4 py-2">Method</th>
+                  <th className="px-4 py-2 text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {payments.map(p => (
+                  <tr key={p.id}>
+                    <td className="px-4 py-2 font-mono">{p.payment_date}</td>
+                    <td className="px-4 py-2 font-mono">{p.invoice_number}</td>
+                    <td className="px-4 py-2">{p.payment_method}</td>
+                    <td className="px-4 py-2 text-right font-mono font-bold">{formatMoney(p.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          !loading && <EmptyState title="No payments recorded yet" />
         )}
       </div>
 

@@ -1,73 +1,48 @@
-# Technical Specification: Brightloop Subscription Management System
+# Specification (R01–R25) and how this repository meets it
 
-## 1. Executive Summary & Challenge Overview
-Brightloop Software sells cloud software, add-ons, and variants on recurring billing models (daily, weekly, monthly, yearly).
-This system provides an end-to-end, multi-role subscription management platform covering:
-- Master Catalog: Products, Variants (e.g. Odoo brand +$560), Plans, Tax rules, Discount rules.
-- Quotation Engine: Pre-configured quotation templates valid for $N$ days, converting to Subscriptions.
-- Subscription Lifecycle: State machine transitions (`Draft` -> `Quotation` -> `Confirmed` -> `Active` -> `Closed` / `Paused`).
-- Recurring Billing Engine: Automated batch & manual billing day execution, strictly idempotent (never bills twice, never skips).
-- Invoicing & Payments: Invoices (`Draft` -> `Confirmed` -> `Paid`), multiple payment methods, partial payments, overdue tracking.
-- Role-Based Access Control (RBAC): Admin (full master setup & staff provisioning), Staff (operations & invoicing), Customer (strict isolated portal view).
-- Finance Dashboard: Real-time MRR, ARR, revenue collected vs owed, overdue invoices, with sub-2s query latency on thousands of records.
+Source: the problem statement and the team's SPEC.pdf. Status values: **Done** (implemented and covered by an automated test), **Partial** (works, with the stated gap). Test files are in `backend/tests`.
 
----
+## Requirements
 
-## 2. Requirements Matrix & Edge Case Trap Checklist
+| ID | Requirement | Implementation | Status | Tests |
+|---|---|---|---|---|
+| R01 | Customer signs up with email and password; public sign-up creates a customer only | `POST /api/auth/register`; role never read from the request | Done | api |
+| R02 | Each email belongs to one account, case-insensitive | Unique index on `lower(email)`; duplicate returns 409 | Done | api |
+| R03 | Password more than 8 characters, with uppercase, lowercase and special character (digits not required, max 64) | `validatePassword`, same rule for sign-up, reset and staff creation | Done | money_dates, api |
+| R04 | Reset link arrives at the registered email | Token hashed (SHA-256), 30 min, single use, older links invalidated; email stored in `email_outbox` | Partial: dev outbox, no SMTP | api |
+| R05 | Admin, staff and customer roles; customers see only their own data | Server-side `requireRole` + 404 isolation | Done | api, demo_story |
+| R06 | Only the admin adds staff | `POST /api/auth/staff` admin-only | Partial: admin sets the initial password (no invite email) | api |
+| R07 | Products: name, type, sales price, cost price, notes | `POST /api/catalog/products`; cost price hidden from staff and customers | Done | catalog_lists, api |
+| R08 | Variants add a price extra (Odoo +560 on 1000 gives 1560) | Unit price copied onto the line at creation | Done | billing, catalog_lists, demo_story |
+| R09 | Plans: price, daily/weekly/monthly/yearly, minimum quantity, availability dates | `POST /api/catalog/plans`; window enforced on create and confirm; minimum quantity per line | Partial: plan `price` is informational, invoices bill subscription lines | catalog_lists, api |
+| R10 | Per plan: closes on its own, can be closed early, paused, renewed | `auto_close`, `can_close_early`, `can_pause`, `can_renew`; violations return 409 for every role | Done | api, billing |
+| R11 | Quotation templates with plan, lines, validity days | Template lines copied; `valid_until = date sent + validity_days`; confirming after it returns 409 | Done | catalog_lists, api |
+| R12 | Subscription number, customer, plan, dates, payment terms, lines | Number from a sequence; terms `Immediate Payment` / `N Days Net` | Done | api, billing |
+| R13 | Draft → Quotation → Confirmed → Active → Closed, visible to the team | State machine (plus Paused); illegal transitions 409; Closed is terminal; timeline per subscription | Done | api |
+| R14 | Invoices created from subscriptions with lines, taxes, totals | Billing engine creates Draft invoices | Done | billing, demo_story |
+| R15 | Taxes calculated automatically from admin rules | Per line on the discounted amount, HALF_UP, rate stored on the line; `PATCH /api/catalog/taxes/:id` affects later invoices only | Done (no UI to edit a rate) | billing, catalog_lists, money_dates |
+| R16 | Confirm, cancel, send, print invoices; Draft → Confirmed → Paid | Cancel blocked once paid; Paid only through payments; send writes to the outbox; print uses the browser | Done | api, catalog_lists |
+| R17 | Nothing billed twice or skipped | Cursor + catch-up + unique constraints + per-subscription transactions + integrity report | Done | billing, concurrency, demo_story |
+| R18 | Only admin creates discount rules (fixed/percentage, minimums, dates, usage limit) | `POST /api/catalog/discounts` admin-only, validated | Done | api, billing |
+| R19 | Discount applies to products or whole subscriptions | Scope `product` or `all`/`subscription` | Done | billing |
+| R20 | Discount appears on the next invoice by itself and stops at expiry or exhaustion | Evaluated per invoice; usage claimed atomically; detached when spent or expired | Done | billing, concurrency |
+| R21 | Payments with method, amount, date, note against the right invoice | Partial allowed; overpayment and non-Confirmed invoices refused | Done | api, demo_story |
+| R22 | See paid / outstanding / overdue to chase overdue | Overdue = Confirmed, balance > 0, due date before today; filters and dashboard list | Partial: no separate reminder email, "Send" re-sends the invoice | api |
+| R23 | Finance view: active subscriptions, revenue, payments, overdue, with filters and summary | `GET /api/analytics/summary` (SQL aggregates, date range) | Done | api, catalog_lists |
+| R24 | Pages respond in under 2 seconds with thousands of subscriptions | Indexes, pagination, SQL aggregation; `npm run benchmark` | Done (measured, see README) | performance |
+| R25 | Customers manage their own subscriptions | Pause, resume, close, renew where the plan allows | Done | api |
 
-| Ref | Requirement | Implementation Strategy | Verification Test |
-|---|---|---|---|
-| R01 | User signup with unique email | Unique constraint on `users.email` | Rejects duplicate registration |
-| R02 | Password validation: **more than 8 characters** with uppercase, lowercase, special char | Regex `^(?=.*[a-z])(?=.*[A-Z])(?=.*[^a-zA-Z0-9]).{9,}$` | Accepts 9+ valid, rejects 8 chars or missing char class |
-| R03 | Password reset link to email | Token generated with expiration, logged to audit email log | Reset token generation & validation test |
-| R04 | Role segregation (Admin, Staff, Customer) | Middleware RBAC; only Admin creates staff; Customer sees only their data | Forbidden 403 on staff creation by non-admin; customer isolation test |
-| R05 | Products with variants | `products` table and `product_variants` with price adjusters (e.g., Odoo Brand adds 560) | Unit price = product base price + variant delta |
-| R06 | Plans with frequencies & rules | Interval: `daily`, `weekly`, `monthly`, `yearly`; min quantity; date bounds; auto-close vs renewable/pausable policy | Validates interval calculation & plan date bounds |
-| R07 | Quotation Templates | Templates with predefined product lines, plan, validity in days | Converts template to Draft subscription |
-| R08 | Subscription state machine | Legal transitions only: `Draft` -> `Quotation` -> `Confirmed` -> `Active` -> `Closed` (or `Paused`) | Rejects illegal transition (e.g., `Draft` -> `Active`) |
-| R09 | Automated Billing Engine | Queries active subscriptions where `next_billing_date <= as_of_date` | Generates invoices with line items, tax, discounts |
-| R10 | **Trap: Zero double-billing & no skipped periods** | Unique composite constraint `UNIQUE(subscription_id, period_start)`, transactional execution | Second run generates 0 new invoices for identical period |
-| R11 | Automatic Tax Rules | `tax_rules` applied to taxable items dynamically | Tax computation verification on invoice lines |
-| R12 | Discount Rules Engine | Fixed or percentage; min order/qty; date range; max usage count; auto-applies to invoice and decrements usage | Decrements usage, auto-expires when limit or end-date reached |
-| R13 | Invoice Lifecycle & Actions | `Draft` -> `Confirmed` -> `Paid`; cancel, send, print (HTML/PDF printable format) | Status checks and print view |
-| R14 | Multi-method payment recording | Bank Transfer, Card, UPI, Cash, Cheque with reference, note, date | Partial payments update balance; completes when fully paid |
-| R15 | Overdue Invoice Management | Flags unpaid invoices past due date for chasing | Filter & highlight overdue invoices |
-| R16 | Finance Executive Dashboard | Active count, MRR, ARR, cash collected, accounts receivable, overdue list | Summary calculations verified |
-| R17 | Sub-2-Second Performance (<50ms target) | Indexed keys on `(customer_id)`, `(status)`, `(next_billing_date)`, `(subscription_id, period_start)` | Tested against 1,000+ seeded records |
+## Assumptions made where the PDF is silent
 
----
+- One currency (displayed as ₹); prices exclude tax.
+- Billing is in advance. Period *k* starts at `start_date + k × interval` (month-end clamped, computed from the start date). `due_date = invoice date + payment-term days`.
+- A period starting on or after the expiry date is not billed. With auto-close off, an expired subscription stays Active for follow-up.
+- Periods that start while a subscription is paused are not billed; they are recorded as intentional skips.
+- A discount is judged at each period's start date, so a catch-up run gives the same result as on-time billing.
+- Plan minimum quantity applies to every product line.
+- A line's unit price is not editable after creation.
+- Invoices are created as Draft by default (optionally Confirmed); payments are accepted only on Confirmed invoices.
 
-## 3. Database Schema Design (Relational & Normalized)
+## API summary
 
-### 3.1 Tables Overview
-1. `users` (id, email, password_hash, full_name, role, created_at)
-2. `password_resets` (id, user_id, token, expires_at, used)
-3. `products` (id, name, type, sales_price, cost_price, notes, is_active, created_at)
-4. `product_variants` (id, product_id, attribute_name, option_name, price_extra)
-5. `plans` (id, name, billing_interval, min_quantity, price, start_date, end_date, auto_close, can_pause, can_renew)
-6. `quotation_templates` (id, name, plan_id, validity_days, notes)
-7. `quotation_template_lines` (id, template_id, product_id, variant_id, default_quantity)
-8. `subscriptions` (id, subscription_number, customer_id, plan_id, status, start_date, expiry_date, next_billing_date, payment_terms, discount_rule_id, created_at, updated_at)
-9. `subscription_lines` (id, subscription_id, product_id, variant_id, quantity, unit_price, tax_id)
-10. `tax_rules` (id, name, rate_percentage, is_default, is_active)
-11. `discount_rules` (id, code, description, discount_type, value, min_amount, min_quantity, start_date, end_date, max_uses, current_uses, applies_to, target_product_id, is_active)
-12. `invoices` (id, invoice_number, subscription_id, customer_id, period_start, period_end, subtotal, tax_amount, discount_amount, total_amount, amount_paid, status, issue_date, due_date, created_at)
-13. `invoice_lines` (id, invoice_id, product_id, variant_id, description, quantity, unit_price, tax_amount, line_total)
-14. `payments` (id, invoice_id, amount, payment_method, payment_date, reference, note, created_at)
-15. `audit_logs` (id, event_type, description, user_id, metadata_json, created_at)
-
----
-
-## 4. API Endpoints Contract
-- **Auth**: `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`, `GET /api/auth/me`
-- **Users**: `GET /api/users/staff`, `POST /api/users/staff` (Admin only)
-- **Products & Variants**: `GET /api/products`, `POST /api/products`, `POST /api/products/:id/variants`
-- **Plans**: `GET /api/plans`, `POST /api/plans`, `PUT /api/plans/:id`
-- **Taxes**: `GET /api/taxes`, `POST /api/taxes`
-- **Discounts**: `GET /api/discounts`, `POST /api/discounts`, `POST /api/discounts/validate`
-- **Templates**: `GET /api/templates`, `POST /api/templates`, `POST /api/templates/:id/convert-to-subscription`
-- **Subscriptions**: `GET /api/subscriptions`, `POST /api/subscriptions`, `GET /api/subscriptions/:id`, `PATCH /api/subscriptions/:id/status`
-- **Billing**: `POST /api/billing/run` (executes idempotent engine), `GET /api/billing/history`
-- **Invoices**: `GET /api/invoices`, `GET /api/invoices/:id`, `PATCH /api/invoices/:id/status`, `POST /api/invoices/:id/send`, `GET /api/invoices/:id/print`
-- **Payments**: `GET /api/payments`, `POST /api/payments`
-- **Dashboard / Analytics**: `GET /api/analytics/summary`, `GET /api/analytics/overdue`, `GET /api/analytics/benchmark`
+`/api/auth` (register, login, forgot-password, reset-password, me, staff, customers, outbox) · `/api/catalog` (products, variants, plans, taxes, discounts, quotation-templates) · `/api/subscriptions` (list, detail, timeline, create, renew, status) · `/api/billing` (run, history, integrity, invoices, confirm-drafts, invoice status, send) · `/api/payments` · `/api/analytics` (summary, benchmark, CSV exports). Every list is paginated (`page`, `page_size`) and returns `pagination`.
