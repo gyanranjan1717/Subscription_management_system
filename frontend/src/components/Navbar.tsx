@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { User } from '../types.js';
-import { DEMO_USERS } from '../services/api.js';
 import { LayoutDashboard, FileText, PlayCircle, CreditCard, Package, UserCheck, LogOut, Home } from 'lucide-react';
 import { cx } from './ui.js';
 
@@ -8,8 +7,6 @@ interface NavbarProps {
   currentUser: User | null;
   activeTab: string;
   setActiveTab: (tab: string) => void;
-  onSwitchPersona: (personaKey: keyof typeof DEMO_USERS) => void | Promise<void>;
-  onRefresh: () => void;
   onLogout: () => void;
 }
 
@@ -28,47 +25,12 @@ const TABS: Tab[] = [
 
 const ROLE_LABEL: Record<User['role'], string> = { admin: 'Admin', staff: 'Staff', customer: 'Customer' };
 
-export const Navbar: React.FC<NavbarProps> = ({ currentUser, activeTab, setActiveTab, onSwitchPersona, onLogout }) => {
-  const [switching, setSwitching] = useState(false);
+export const Navbar: React.FC<NavbarProps> = ({ currentUser, activeTab, setActiveTab, onLogout }) => {
   const tabs = TABS.filter(t => !currentUser || t.roles.includes(currentUser.role));
-
-  const switchTo = async (key: keyof typeof DEMO_USERS) => {
-    setSwitching(true);
-    await onSwitchPersona(key);
-    setSwitching(false);
-  };
 
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
-      {/* Demo affordance: clearly labelled, one click to test roles and isolation */}
-      <div className="bg-amber-50 border-b border-amber-200 text-xs text-amber-900">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="font-semibold uppercase tracking-wide">Demo</span>
-          <span className="hidden sm:inline text-amber-800">Switch account to test roles and customer isolation:</span>
-          <div className="flex flex-wrap gap-1">
-            {(Object.keys(DEMO_USERS) as Array<keyof typeof DEMO_USERS>).map(key => {
-              const persona = DEMO_USERS[key];
-              const current = currentUser?.email.toLowerCase() === persona.email.toLowerCase();
-              return (
-                <button
-                  key={key}
-                  disabled={switching}
-                  onClick={() => switchTo(key)}
-                  aria-pressed={current}
-                  className={cx(
-                    'px-2 py-0.5 rounded border text-xs',
-                    current ? 'bg-amber-200 border-amber-400 font-semibold' : 'bg-white border-amber-300 hover:bg-amber-100'
-                  )}
-                >
-                  {persona.short}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="w-full px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-12 gap-4">
           <div className="flex items-center gap-2 min-w-0">
             <span className="h-6 w-6 rounded bg-brand-700 text-white text-xs font-bold flex items-center justify-center" aria-hidden="true">B</span>

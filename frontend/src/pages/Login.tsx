@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { api, DEMO_USERS, setSession } from '../services/api.js';
+import { api, setSession } from '../services/api.js';
 import { User } from '../types.js';
 import { Alert, Button, Input } from '../components/ui.js';
 
@@ -47,14 +47,6 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
     } finally {
       setBusy(false);
     }
-  };
-
-  const fillDemo = (key: keyof typeof DEMO_USERS) => {
-    setMode('signin');
-    setEmail(DEMO_USERS[key].email);
-    setPassword(DEMO_USERS[key].password);
-    setError(null);
-    setNotice(null);
   };
 
   return (
@@ -108,22 +100,6 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
           </div>
         </div>
 
-        <div className="mt-4 border border-amber-200 bg-amber-50 rounded-lg p-3">
-          <div className="text-xs font-semibold uppercase tracking-wide text-amber-900 mb-2">Demo accounts</div>
-          <div className="grid grid-cols-2 gap-2">
-            {(Object.keys(DEMO_USERS) as Array<keyof typeof DEMO_USERS>).map(k => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => fillDemo(k)}
-                className="text-left text-xs bg-white border border-amber-200 rounded-md px-2 py-1.5 hover:bg-amber-100"
-              >
-                {DEMO_USERS[k].label}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-amber-800 mt-2">Fills the form with seeded demo credentials.</p>
-        </div>
       </div>
     </div>
   );

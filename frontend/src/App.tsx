@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User } from './types.js';
-import { api, getCurrentUser, DEMO_USERS, setSession } from './services/api.js';
+import { api, getCurrentUser, setSession } from './services/api.js';
 import { Navbar } from './components/Navbar.js';
 import { Dashboard } from './pages/Dashboard.js';
 import { Subscriptions } from './pages/Subscriptions.js';
@@ -48,15 +48,6 @@ export const App: React.FC = () => {
     setTargetInvoiceId(null);
   };
 
-  const handleSwitchPersona = async (key: keyof typeof DEMO_USERS) => {
-    const creds = DEMO_USERS[key];
-    try {
-      handleLoggedIn((await api.login(creds.email, creds.password)).user);
-    } catch (err) {
-      console.error('Persona switch failed', err);
-    }
-  };
-
   const openInvoice = (invoiceId: number) => {
     setTargetInvoiceId(invoiceId);
     setActiveTab('invoices');
@@ -84,12 +75,10 @@ export const App: React.FC = () => {
           currentUser={currentUser}
           activeTab={activeTab}
           setActiveTab={tab => { setActiveTab(tab); if (tab !== 'invoices') setTargetInvoiceId(null); }}
-          onSwitchPersona={handleSwitchPersona}
-          onRefresh={() => window.location.reload()}
           onLogout={handleLogout}
         />
 
-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <main className="flex-1 w-full px-4 sm:px-6 lg:px-8 py-6">
           {activeTab === 'dashboard' && isStaff && <Dashboard onNavigateToInvoice={openInvoice} onNavigateToBilling={() => setActiveTab('billing')} />}
           {activeTab === 'catalog' && isStaff && <Catalog currentUser={currentUser} />}
           {activeTab === 'subscriptions' && isStaff && <Subscriptions />}
