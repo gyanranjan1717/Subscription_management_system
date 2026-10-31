@@ -1,6 +1,8 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
 import { getDb } from './db/database.js';
 import { HttpError } from './lib/errors.js';
 import { authRouter } from './routes/auth.routes.js';
@@ -49,6 +51,16 @@ export function createApp() {
   app.use('/api/billing', billingRouter);
   app.use('/api/payments', paymentRouter);
   app.use('/api/analytics', analyticsRouter);
+
+  // Serve frontend build in production
+  const frontendDist = path.join(__dirname, '../../frontend/dist');
+  if (fs.existsSync(frontendDist)) {
+    app.use(express.static(frontendDist));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(path.join(frontendDist, 'index.html'));
+    });
+  }
 
   app.use('/api', (_req, res) => {
     res.status(404).json({ success: false, error: 'Resource not found.' });
