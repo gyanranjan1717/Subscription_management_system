@@ -2,7 +2,7 @@
 
 Odoo × Make-A-Ton 9.0 (Kochi), Round 1. One system for products, plans, quotations, subscriptions, billing runs, invoices, payments and the finance dashboard.
 
-**Stack:** Node.js 24 + TypeScript + Express · SQLite (WAL, `node:sqlite`) · JWT + bcrypt · React + TypeScript + Vite + Tailwind. No other services.
+**Stack:** Node.js 24 + TypeScript + Express · SQLite (WAL, `node:sqlite`) · JWT + bcrypt · React + TypeScript + Vite + Tailwind. Optional integrations, each off until configured: **Razorpay** (online payments) and **SMTP** (real email).
 
 **What makes it trustworthy:** billing is idempotent (run it twice, the second run creates 0 invoices), missed periods are caught up, every amount is exact to the cent, and a built-in integrity report checks the ledger against the live database.
 
@@ -23,7 +23,7 @@ npm run dev         # API on :5000, UI on http://localhost:3000
 
 | Command | What it does |
 |---|---|
-| `npm test` | 73 backend tests (Node test runner) |
+| `npm test` | 96 backend tests (Node test runner) |
 | `npm run build` | type-checks and builds backend and frontend |
 | `npm run benchmark` | builds a 5,000-subscription dataset and times the real endpoints |
 | `npm run seed` | rebuilds the database (run it after pulling schema changes) |
@@ -51,7 +51,7 @@ Sign in with these to test each role. Sign out and sign in as a customer to chec
 4. **Billing run:** **Preview** (saves nothing), **Run billing** (catch-up creates every missed period), **Run billing again** (0 created). The integrity panel shows 0 duplicate and 0 missing periods. **Confirm all drafts.**
 5. **Invoices:** open one (Subtotal − Discount + Tax = Total, then Paid and Outstanding). Record a partial payment, then the full balance: Confirmed → Paid.
 6. **Sign in as a customer:** only that customer's subscriptions, invoices and payments appear; pause, resume or renew a subscription. Another customer's invoice id returns 404.
-7. **Close with the evidence:** `npm test` (73 passing), [docs/PERFORMANCE_RESULTS.md](docs/PERFORMANCE_RESULTS.md), and [docs/HANDOFF.md](docs/HANDOFF.md).
+7. **Close with the evidence:** `npm test` (96 passing), [docs/PERFORMANCE_RESULTS.md](docs/PERFORMANCE_RESULTS.md), and [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Architecture
 
@@ -62,7 +62,7 @@ frontend/src                   backend/src
                system), Pager               state machine, payments, integrity report
   lib/         format (INR,      lib/       exact money (integer cents), dates, validation, errors
                dates)            db/        schema.sql (constraints, indexes), database.ts, seed.ts
-  services/    api client      backend/tests   73 tests        backend/scripts/benchmark.ts
+  services/    api client      backend/tests   96 tests        backend/scripts/benchmark.ts
 ```
 
 Details are in [ARCHITECTURE.md](ARCHITECTURE.md) and the requirement-by-requirement spec in [SPEC.md](SPEC.md).
@@ -81,10 +81,21 @@ A small design system (`components/ui.tsx`): labelled form controls, modal and c
 
 **Money.** All arithmetic is in integer cents with HALF_UP rounding per line, in one calculator (`services/invoiceCalculator.ts`). `total = subtotal − discount + tax` is enforced by a database `CHECK`. User-entered amounts are parsed from text, never via floats. A line's unit price (product price + variant extra) is copied when the line is created, so later price changes never touch existing lines or invoices. Tax is computed per line on the discounted amount and its rate is stored on the invoice line.
 
+## Online payments (Razorpay) and email
+
+**Razorpay.** Customers can pay an invoice, in full or in part, from "My account → Pay online". Flow: the server fixes the amount and creates a Razorpay order (`payment_orders`); the browser opens Razorpay Checkout; on success the server verifies the HMAC signature (mandatory), asks Razorpay for the payment itself (order, amount, currency, captured), and only then records the payment, exactly once. A signed webhook (`POST /api/payments/razorpay/webhook`, `RAZORPAY_WEBHOOK_SECRET`) settles payments whose browser tab was closed. A forged or missing signature, a wrong amount, another customer's invoice, and a replay are all refused (see `tests/razorpay.test.ts`). With `rzp_test_*` keys no real money moves. Without keys, "Pay online" is hidden; there is no simulated payment mode.
+
+**Email.** Set `SMTP_*` in `backend/.env` (Gmail needs an App Password) and OTP codes, password-reset links, invoices and payment reminders are delivered for real. `GET /api/auth/outbox` (admin, non-production) shows every message with its delivery status.
+
+**Configuration.** Copy `.env.example` to `backend/.env`. Nothing sensitive has a default: no key means that feature is off, not that a published default applies. Admin self-registration works only if you set `ADMIN_REGISTRATION_KEY` (16+ characters).
+
+**Catalog edits.** Admins can edit and archive products, variants, plans, discounts and quotation templates. Edits never rewrite history: existing subscription lines and issued invoices keep their original prices.
+
 ## Security, roles and isolation
 
+- **Sign-up:** a 6-digit code is emailed first and is required to register (stored hashed, 10 minutes, dies after 5 wrong guesses). The code is only echoed in API responses in non-production when no SMTP server is configured.
 - **Passwords:** more than 8 characters (9–64) with upper, lower and special character; bcrypt. Email is unique case-insensitively through a database index (`lower(email)`); duplicates return 409.
-- **Reset:** random 32-byte token, only its SHA-256 is stored, 30-minute expiry, single use, a new request kills older links, identical response for unknown emails. The email is written to `email_outbox` (dev mailbox; there is no SMTP).
+- **Reset:** random 32-byte token, only its SHA-256 is stored, 30-minute expiry, single use, a new request kills older links, identical response for unknown emails. The email goes through the mailer: it is always recorded in `email_outbox` with its delivery status (`sent`, `failed`, or `simulated` when SMTP is not configured) and delivered by SMTP when it is.
 - **Sessions:** JWT (HS256) is verified, then the user is re-read from the database on every request, so role changes and deactivation apply immediately. Login and forgot-password are rate limited.
 - **Roles (enforced on the server):** only **admin** creates staff, products, plans, taxes, discounts and quotation templates. **Staff** runs billing, confirms invoices and records payments. **Customers** have no catalog, billing or dashboard access.
 - **Isolation:** a customer requesting another customer's subscription, timeline, invoice, renewal or status change gets the same `404` as for an id that does not exist, and list filters are forced from the token. Tested explicitly.
@@ -112,7 +123,7 @@ Run-to-run noise on this machine is roughly 2 to 4× (an earlier run measured 23
 | R01 | Customer sign-up | Done | api | Sign-in → Create account |
 | R02 | One account per email, case-insensitive | Done (DB index) | api | Create the same account twice |
 | R03 | Password rule | Done | money_dates, api | Sign-up form |
-| R04 | Reset link to registered email | Partial: dev outbox, no SMTP | api | My account → Password |
+| R04 | Reset link to registered email | Done (real SMTP when configured; outbox + status otherwise) | api, otp_registration | Forgot password |
 | R05 | Three roles, customer portal | Done | api, demo_story | Sign in as each role |
 | R06 | Only admin adds staff | Partial: admin sets the initial password, no invite email | api | Staff |
 | R07 | Product with prices and notes | Done | catalog_lists | Catalog → Products |
@@ -124,18 +135,18 @@ Run-to-run noise on this machine is roughly 2 to 4× (an earlier run measured 23
 | R13 | Draft → Quotation → Confirmed → Active → Closed | Done (plus Paused, timeline) | api | Subscription detail |
 | R14 | Invoices created from subscriptions | Done (Draft) | billing, demo_story | Billing run |
 | R15 | Automatic tax from admin rules | Done (rate edit via API only) | billing, catalog_lists | Invoice view |
-| R16 | Confirm, cancel, send, print | Done (send = outbox, print = browser) | api, catalog_lists | Invoices |
+| R16 | Confirm, cancel, send, print | Done (send = emailed to the customer, print = browser) | api, catalog_lists | Invoices |
 | R17 | Nothing billed twice or skipped | Done | billing, concurrency, demo_story | Billing run twice |
 | R18 | Admin-only discount rules | Done | api, billing | Catalog → Discounts |
 | R19 | Product or subscription scope | Done (one rule per subscription) | billing | Invoice discount line |
 | R20 | Discount applies and stops by itself | Done | billing, concurrency | Invoice view |
 | R21 | Payments with method, amount, date, note | Done (partial allowed, no overpayment) | api, demo_story | Record payment |
-| R22 | Paid, outstanding, overdue, chasing | Partial: "Send" re-sends the invoice, no separate reminder | api | Invoices, Dashboard |
+| R22 | Paid, outstanding, overdue, chasing | Done: overdue list, per-invoice and bulk payment reminders (24 h cooldown, audited) | admin_edit_reminders | Dashboard, Invoices |
 | R23 | Finance view with filters | Done (date range) | catalog_lists, api | Dashboard |
 | R24 | Pages under 2 seconds | Done (measured above) | performance | `npm run benchmark` |
 | R25 | Customer self-service | Done | api | My account |
 
-## Tests (73)
+## Tests (96)
 
 `api` 27 · `billing` 21 · `catalog_lists` 12 · `money_dates` 8 · `performance` 3 · `concurrency` 1 · `demo_story` 1. `demo_story` follows the demo script end to end through the API. The frontend has no automated tests; it is type-checked, built and was exercised manually.
 

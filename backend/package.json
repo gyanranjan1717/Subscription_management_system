@@ -8,6 +8,7 @@
     "build": "tsc && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\"",
     "start": "node dist/server.js",
     "seed": "tsx src/db/seed.ts",
+    "clean": "tsx src/db/clean.ts",
     "test": "node --import tsx --test \"tests/*.test.ts\"",
     "benchmark": "tsx scripts/benchmark.ts"
   },

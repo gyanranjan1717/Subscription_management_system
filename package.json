@@ -7,6 +7,7 @@
     "setup": "npm --prefix backend install && npm --prefix frontend install && npm run seed",
     "dev": "node run-dev.js",
     "seed": "npm --prefix backend run seed",
+    "clean": "npm --prefix backend run clean",
     "test": "npm --prefix backend test",
     "build": "npm --prefix backend run build && npm --prefix frontend run build",
     "benchmark": "npm --prefix backend run benchmark"

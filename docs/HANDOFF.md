@@ -2,7 +2,7 @@
 
 Scope: three hardening passes on the existing Brightloop app (backend, performance, then frontend), starting from commit `df651c3`. Stack unchanged: Node + TypeScript + Express, SQLite (WAL), JWT + bcrypt, React + Vite + Tailwind. Total: about 64 files changed.
 
-Current state: **73 backend tests pass**, backend and frontend build, benchmark slowest request 67.5 ms. Nothing was pushed by the assistant; the owner commits manually.
+Current state: **96 backend tests pass**, backend and frontend build, benchmark slowest request 67.5 ms. Nothing was pushed by the assistant; the owner commits manually.
 
 ## 1. Backend correctness (billing, money, security)
 
@@ -30,7 +30,7 @@ Current state: **73 backend tests pass**, backend and frontend build, benchmark 
 - Prepared-statement cache; batched line loading in billing; every list paginated (100 default, 200 max) with server-side search and date filters; dashboard aggregated in SQL with a period filter.
 - `backend/scripts/benchmark.ts` (`npm run benchmark`) builds 2,000 customers, 5,000 subscriptions, about 25,000 invoices and 18,000 payments, and writes `docs/PERFORMANCE_RESULTS.md`.
 
-## 4. Tests (73)
+## 4. Tests (96)
 
 `api` 27 · `billing` 21 · `catalog_lists` 12 · `money_dates` 8 · `performance` 3 · `concurrency` 1 · `demo_story` 1, in `backend/tests/` (Node test runner, `tsx`). `helpers.ts` + `env.ts` set up an in-memory database. `concurrency.test.ts` spawns four real processes against one file database. The old `business_rules.test.ts` was replaced and its coverage ported. No frontend tests exist.
 
@@ -51,7 +51,7 @@ Current state: **73 backend tests pass**, backend and frontend build, benchmark 
 npm --prefix backend install && npm --prefix frontend install
 npm run seed      # rebuilds the database (wipes data)
 npm run dev       # API :5000, UI http://localhost:3000
-npm test          # 73 tests
+npm test          # 96 tests
 npm run build
 npm run benchmark
 ```
@@ -61,7 +61,7 @@ Demo logins (not shown in the UI any more): admin@brightloop.com / staff@brightl
 ## 8. Known limitations and good next steps
 
 1. **Plan `price` is not billed** (SPEC assumption A2 is open). Invoices come from subscription lines. Decide with the mentor, then add a "Plan fee" invoice line.
-2. **Email is a dev outbox** (`email_outbox`); no SMTP. Reset and invoice emails are stored, not sent. Staff creation sets a password directly (no invite link).
+2. **Email** is real when `SMTP_*` is set (delivery status is stored per message); otherwise it is only recorded as `simulated`. Staff creation sets a password directly (no invite link).
 3. Invoice numbers are assigned at billing, not at confirmation. One discount rule per subscription.
 4. Tax rates can be edited only through the API; there is no UI. There is no endpoint to deactivate users (`active` is only set in the database).
 5. Money columns are 2-decimal numbers protected by `CHECK`, not integer columns.
@@ -76,3 +76,11 @@ Demo logins (not shown in the UI any more): admin@brightloop.com / staff@brightl
 - Billing writes must stay inside `runTransaction` (re-entrant: outer `BEGIN IMMEDIATE`, inner savepoints).
 - Any schema change needs a `SCHEMA_VERSION` bump, a `schema.sql` edit and a reseed; update the tests that rely on constraints.
 - The frontend never calculates money. The only exception is the exact-cents list-price preview (product price + variant extra) in Catalog and the new-subscription review; the server recomputes it.
+
+## Late additions
+
+- **Real Razorpay payments** (orders created server-side, mandatory signature, gateway-verified amounts, part-payments, signed webhook, idempotent). Schema v3 adds `payment_orders`; run `npm run seed` after pulling.
+- **Sign-up requires the emailed code**; codes are hashed and attempt-limited. The default admin key is gone: admin self-registration needs `ADMIN_REGISTRATION_KEY` in the environment.
+- **Payment reminders** (single and bulk) and **invoice emails** go through the mailer.
+- **Catalog edit / archive** for products, variants, plans, discounts and templates (admin).
+- **Dashboard** invoiced-vs-collected six-month chart; **subscription activity timeline** in the customer portal.
