@@ -73,7 +73,7 @@ authRouter.post('/send-otp', handle(async (req, res) => {
     execute('INSERT INTO email_otps (email, otp_code, expires_at) VALUES (?, ?, ?)', [email, otpCode, expiresAt]);
     execute(
       'INSERT INTO email_outbox (to_email, subject, body, kind, related_id) VALUES (?, ?, ?, ?, ?)',
-      [email, 'Your Brightloop Verification Code', `Your 6-digit verification code is: ${otpCode}. It expires in 10 minutes.`, 'OTP', null]
+      [email, 'Your Brightloop Verification Code', `Your 6-digit verification code is: ${otpCode}. It expires in 10 minutes.`, 'RESET', null]
     );
     audit('OTP_DISPATCHED', `Verification OTP generated for ${email}`, null, { email });
   });
