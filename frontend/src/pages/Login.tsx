@@ -107,7 +107,7 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
     setBusy(true);
     try {
       const res = await api.sendOtp(email.trim().toLowerCase());
-      setOtpPreview(res.otpPreview || null);
+      setOtpPreview(null);
       setSignupStep('otp');
       setResendCooldown(60);
       setNotice(`Verification code sent to ${email.trim()}`);
