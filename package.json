@@ -1,0 +1,14 @@
+{
+  "name": "subscription-management-system",
+  "version": "1.0.0",
+  "description": "Brightloop Software - Subscription Management System for Odoo x Make-A-Ton 9.0",
+  "private": true,
+  "scripts": {
+    "setup": "npm --prefix backend install && npm --prefix frontend install && npm run seed",
+    "dev": "node run-dev.js",
+    "seed": "npm --prefix backend run seed",
+    "test": "npm --prefix backend test",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build"
+  },
+  "keywords": ["odoo", "hackathon", "subscriptions", "billing-engine", "invoicing"]
+}
