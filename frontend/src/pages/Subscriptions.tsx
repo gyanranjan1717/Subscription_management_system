@@ -10,6 +10,7 @@ export const Subscriptions: React.FC = () => {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [selectedSub, setSelectedSub] = useState<Subscription | null>(null);
   const [statusFilter, setStatusFilter] = useState('All');
+  const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -147,12 +148,22 @@ export const Subscriptions: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={openCreateModal}
-          className="px-4 py-2 bg-odoo-500 hover:bg-odoo-600 text-white rounded-lg text-sm font-semibold shadow-sm transition-all flex items-center gap-1.5 self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" /> Create Subscription / Quote
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => window.open('/api/analytics/export/subscriptions', '_blank')}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold border border-slate-300 transition-all flex items-center gap-1.5"
+            title="Download CSV"
+          >
+            Export CSV
+          </button>
+
+          <button
+            onClick={openCreateModal}
+            className="px-4 py-2 bg-odoo-500 hover:bg-odoo-600 text-white rounded-lg text-sm font-semibold shadow-sm transition-all flex items-center gap-1.5 self-start sm:self-auto"
+          >
+            <Plus className="w-4 h-4" /> Create Subscription / Quote
+          </button>
+        </div>
       </div>
 
       {actionNotice && (
@@ -162,21 +173,33 @@ export const Subscriptions: React.FC = () => {
         </div>
       )}
 
-      {/* Filter Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1">
-        {['All', 'Active', 'Quotation', 'Confirmed', 'Draft', 'Paused', 'Closed'].map(st => (
-          <button
-            key={st}
-            onClick={() => setStatusFilter(st)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
-              statusFilter === st
-                ? 'bg-slate-900 text-white shadow-sm'
-                : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
-            }`}
-          >
-            {st}
-          </button>
-        ))}
+      {/* Filter Tabs & Search */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          {['All', 'Active', 'Quotation', 'Confirmed', 'Draft', 'Paused', 'Closed'].map(st => (
+            <button
+              key={st}
+              onClick={() => setStatusFilter(st)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                statusFilter === st
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+              }`}
+            >
+              {st}
+            </button>
+          ))}
+        </div>
+
+        <div className="w-full sm:w-64">
+          <input
+            type="text"
+            placeholder="Search subscriptions or customers..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-odoo-500"
+          />
+        </div>
       </div>
 
       {/* Main Grid: Subscriptions Table + Detail Panel */}
@@ -196,7 +219,18 @@ export const Subscriptions: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {subscriptions.map(s => (
+                {subscriptions
+                  .filter(s => {
+                    if (!searchTerm) return true;
+                    const term = searchTerm.toLowerCase();
+                    return (
+                      s.subscription_number.toLowerCase().includes(term) ||
+                      s.customer_name.toLowerCase().includes(term) ||
+                      (s.company_name && s.company_name.toLowerCase().includes(term)) ||
+                      s.plan_name.toLowerCase().includes(term)
+                    );
+                  })
+                  .map(s => (
                   <tr
                     key={s.id}
                     className={`hover:bg-slate-50 transition-colors ${selectedSub?.id === s.id ? 'bg-purple-50/40' : ''}`}

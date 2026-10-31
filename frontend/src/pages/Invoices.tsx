@@ -15,6 +15,7 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('All');
   const [overdueOnly, setOverdueOnly] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
 
   // Modal states
@@ -71,6 +72,18 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
       loadInvoices();
     } catch (err: any) {
       alert('Failed to confirm: ' + err.message);
+    }
+  };
+
+  const handleCancelInvoice = async (id: number) => {
+    if (!confirm('Are you sure you want to cancel this invoice?')) return;
+    try {
+      await api.updateInvoiceStatus(id, 'Cancelled');
+      setFeedback(`Invoice #${id} cancelled.`);
+      setTimeout(() => setFeedback(null), 3000);
+      loadInvoices();
+    } catch (err: any) {
+      alert('Failed to cancel: ' + err.message);
     }
   };
 
@@ -143,8 +156,15 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
           </p>
         </div>
 
-        {/* Filters */}
-        <div className="flex items-center gap-2">
+        {/* Filters & Export */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => window.open('/api/analytics/export/invoices', '_blank')}
+            className="px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+          >
+            Export CSV
+          </button>
+
           <button
             onClick={() => setOverdueOnly(!overdueOnly)}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 ${
@@ -168,21 +188,33 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
         </div>
       )}
 
-      {/* Status Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1">
-        {['All', 'Confirmed', 'Paid', 'Draft', 'Cancelled'].map(st => (
-          <button
-            key={st}
-            onClick={() => { setStatusFilter(st); setOverdueOnly(false); }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
-              statusFilter === st && !overdueOnly
-                ? 'bg-slate-900 text-white shadow-sm'
-                : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
-            }`}
-          >
-            {st}
-          </button>
-        ))}
+      {/* Status Tabs & Search */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          {['All', 'Confirmed', 'Paid', 'Draft', 'Cancelled'].map(st => (
+            <button
+              key={st}
+              onClick={() => { setStatusFilter(st); setOverdueOnly(false); }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                statusFilter === st && !overdueOnly
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+              }`}
+            >
+              {st}
+            </button>
+          ))}
+        </div>
+
+        <div className="w-full sm:w-64">
+          <input
+            type="text"
+            placeholder="Search invoice #, customer..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-1 focus:ring-odoo-500"
+          />
+        </div>
       </div>
 
       {/* Invoice Table */}
@@ -202,7 +234,17 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {invoices.map(inv => {
+              {invoices
+                .filter(inv => {
+                  if (!searchTerm) return true;
+                  const term = searchTerm.toLowerCase();
+                  return (
+                    inv.invoice_number.toLowerCase().includes(term) ||
+                    (inv.customer_name && inv.customer_name.toLowerCase().includes(term)) ||
+                    (inv.company_name && inv.company_name.toLowerCase().includes(term))
+                  );
+                })
+                .map(inv => {
                 const balance = Number((inv.total_amount - inv.amount_paid).toFixed(2));
                 return (
                   <tr key={inv.id} className="hover:bg-slate-50 transition-colors">
@@ -244,6 +286,15 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
                           className="px-2 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-semibold"
                         >
                           Confirm
+                        </button>
+                      )}
+
+                      {['Draft', 'Confirmed'].includes(inv.status) && (
+                        <button
+                          onClick={() => handleCancelInvoice(inv.id)}
+                          className="px-2 py-1 bg-red-50 text-red-700 hover:bg-red-100 rounded text-xs font-semibold"
+                        >
+                          Cancel
                         </button>
                       )}
 

@@ -124,6 +124,7 @@ subscriptionRouter.post('/', authenticate, (req: Request, res: Response): void =
     // Determine plan
     let effectivePlanId = plan_id;
     let templateLines: any[] = [];
+    let calculatedExpiryDate = expiry_date || null;
 
     if (template_id) {
       const template = queryOne<{ id: number; plan_id: number; validity_days: number }>(
@@ -136,6 +137,13 @@ subscriptionRouter.post('/', authenticate, (req: Request, res: Response): void =
       }
       effectivePlanId = template.plan_id;
       templateLines = queryAll('SELECT * FROM quotation_template_lines WHERE template_id = ?', [template_id]);
+      
+      // Auto-compute expiry date based on template validity days
+      if (!calculatedExpiryDate && template.validity_days) {
+        const d = new Date(startDate);
+        d.setDate(d.getDate() + template.validity_days);
+        calculatedExpiryDate = d.toISOString().split('T')[0];
+      }
     }
 
     if (!effectivePlanId) {
@@ -143,13 +151,26 @@ subscriptionRouter.post('/', authenticate, (req: Request, res: Response): void =
       return;
     }
 
-    const plan = queryOne<{ id: number; billing_interval: 'daily' | 'weekly' | 'monthly' | 'yearly'; min_quantity: number }>(
+    const plan = queryOne<{ id: number; name: string; billing_interval: 'daily' | 'weekly' | 'monthly' | 'yearly'; min_quantity: number }>(
       'SELECT * FROM plans WHERE id = ?',
       [effectivePlanId]
     );
 
     if (!plan) {
       res.status(400).json({ success: false, error: 'Specified plan does not exist' });
+      return;
+    }
+
+    // Process lines (custom lines or inherited from template)
+    const inputLines = (Array.isArray(lines) && lines.length > 0) ? lines : templateLines;
+
+    // Requirement R06: Enforce plan minimum quantity
+    const totalOrderQty = inputLines.reduce((sum: number, item: any) => sum + (item.quantity || item.default_quantity || 1), 0);
+    if (plan.min_quantity > 1 && totalOrderQty < plan.min_quantity) {
+      res.status(400).json({
+        success: false,
+        error: `Plan '${plan.name}' requires a minimum quantity of ${plan.min_quantity} units. Your order has only ${totalOrderQty}.`
+      });
       return;
     }
 
@@ -168,14 +189,11 @@ subscriptionRouter.post('/', authenticate, (req: Request, res: Response): void =
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         subNumber, targetCustomerId, effectivePlanId, status,
-        startDate, expiry_date || null, nextBillingDate, payment_terms || 'Immediate Payment',
+        startDate, calculatedExpiryDate, nextBillingDate, payment_terms || 'Immediate Payment',
         discount_rule_id || null, notes || null
       ]);
 
       const subId = Number(ins.lastInsertRowid);
-
-      // Process lines (custom lines or inherited from template)
-      const inputLines = (Array.isArray(lines) && lines.length > 0) ? lines : templateLines;
 
       for (const item of inputLines) {
         const prod = queryOne<{ id: number; sales_price: number }>(
@@ -207,7 +225,7 @@ subscriptionRouter.post('/', authenticate, (req: Request, res: Response): void =
         ]);
       }
 
-      return { id: subId, subscription_number: subNumber };
+      return { id: subId, subscription_number: subNumber, expiry_date: calculatedExpiryDate };
     });
 
     res.status(201).json({
@@ -218,6 +236,66 @@ subscriptionRouter.post('/', authenticate, (req: Request, res: Response): void =
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// Self-Service Renew Subscription (Customer or Staff)
+subscriptionRouter.post('/:id/renew', authenticate, (req: Request, res: Response): void => {
+  const subId = Number(req.params.id);
+  const sub = queryOne<{
+    id: number;
+    customer_id: number;
+    plan_id: number;
+    status: string;
+    expiry_date: string | null;
+    subscription_number: string;
+    can_renew: number;
+    billing_interval: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  }>(`
+    SELECT s.id, s.customer_id, s.plan_id, s.status, s.expiry_date, s.subscription_number,
+           p.can_renew, p.billing_interval
+    FROM subscriptions s
+    JOIN plans p ON s.plan_id = p.id
+    WHERE s.id = ?
+  `, [subId]);
+
+  if (!sub) {
+    res.status(404).json({ success: false, error: 'Subscription not found' });
+    return;
+  }
+
+  if (req.user!.role === 'customer' && sub.customer_id !== req.user!.id) {
+    res.status(403).json({ success: false, error: 'Access denied. You do not own this subscription.' });
+    return;
+  }
+
+  if (sub.can_renew === 0) {
+    res.status(400).json({ success: false, error: 'This plan policy does not permit renewals.' });
+    return;
+  }
+
+  const baseDate = sub.expiry_date || new Date().toISOString().split('T')[0];
+  const newExpiry = computeNextDate(baseDate, sub.billing_interval);
+
+  execute(
+    `UPDATE subscriptions SET expiry_date = ?, status = 'Active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [newExpiry, subId]
+  );
+
+  execute(
+    'INSERT INTO audit_logs (event_type, description, user_id, metadata_json) VALUES (?, ?, ?, ?)',
+    [
+      'SUBSCRIPTION_RENEWED',
+      `Subscription ${sub.subscription_number} renewed until ${newExpiry}`,
+      req.user!.id,
+      JSON.stringify({ subscriptionId: subId, previousExpiry: sub.expiry_date, newExpiry })
+    ]
+  );
+
+  res.json({
+    success: true,
+    message: `Subscription ${sub.subscription_number} renewed successfully until ${newExpiry}`,
+    newExpiry
+  });
 });
 
 // Update Subscription Status (State Machine transition)

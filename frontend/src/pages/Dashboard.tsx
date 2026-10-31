@@ -86,7 +86,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
         </div>
 
         {/* SLA & Performance Pill */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-3.5 py-2 rounded-lg text-xs font-medium flex items-center gap-2">
             <Zap className="w-4 h-4 text-emerald-600 animate-pulse" />
             <div>
@@ -95,6 +95,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
               <span className="text-slate-500 ml-1">(Tested on 1,000+ subs)</span>
             </div>
           </div>
+
+          <button
+            onClick={() => window.open('/api/analytics/export/invoices', '_blank')}
+            className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-semibold border border-slate-300 transition-all flex items-center gap-1.5"
+            title="Download CSV for Excel / Accounting"
+          >
+            <TrendingUp className="w-4 h-4 text-slate-500" /> Export CSV
+          </button>
 
           <button
             onClick={onNavigateToBilling}

@@ -153,6 +153,10 @@ export const api = {
     return request(`/subscriptions/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
   },
 
+  async renewSubscription(id: number): Promise<any> {
+    return request(`/subscriptions/${id}/renew`, { method: 'POST' });
+  },
+
   // Billing
   async runBillingCycle(as_of_date?: string): Promise<{ result: any }> {
     return request('/billing/run', { method: 'POST', body: JSON.stringify({ as_of_date }) });

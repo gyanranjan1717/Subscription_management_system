@@ -69,6 +69,17 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
     }
   };
 
+  const handleRenew = async (id: number) => {
+    try {
+      const res = await api.renewSubscription(id);
+      setActionNotice(res.message);
+      setTimeout(() => setActionNotice(null), 4000);
+      loadData();
+    } catch (err: any) {
+      alert('Renewal failed: ' + err.message);
+    }
+  };
+
   const handleClose = async (id: number) => {
     if (!confirm('Are you sure you want to cancel this subscription?')) return;
     try {
@@ -182,13 +193,21 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                 </div>
 
                 {/* Self-service actions */}
-                <div className="flex gap-2 pt-2 border-t border-slate-200/60">
+                <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200/60">
+                  {s.can_renew === 1 && s.status !== 'Closed' && (
+                    <button
+                      onClick={() => handleRenew(s.id)}
+                      className="px-3 py-1 bg-purple-50 hover:bg-purple-100 text-odoo-500 rounded text-xs font-semibold flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Renew ({s.billing_interval})
+                    </button>
+                  )}
                   {s.status === 'Active' && s.can_pause === 1 && (
                     <button
                       onClick={() => handlePause(s.id)}
                       className="px-3 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded text-xs font-semibold flex items-center gap-1"
                     >
-                      <PauseCircle className="w-3.5 h-3.5" /> Pause Subscription
+                      <PauseCircle className="w-3.5 h-3.5" /> Pause
                     </button>
                   )}
                   {s.status === 'Paused' && (

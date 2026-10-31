@@ -211,6 +211,31 @@ export function runBillingCycle(asOfDate: string = new Date().toISOString().spli
       // Record discount usage if applied
       if (discountRes.applicable && sub.discount_rule_id) {
         recordDiscountUsage(sub.discount_rule_id);
+
+        // Check if discount rule has reached its usage cap or expired
+        const updatedRule = queryOne<{ current_uses: number; max_uses: number; end_date: string | null; code: string }>(
+          'SELECT current_uses, max_uses, end_date, code FROM discount_rules WHERE id = ?',
+          [sub.discount_rule_id]
+        );
+
+        if (updatedRule) {
+          const usageExceeded = updatedRule.max_uses > 0 && updatedRule.current_uses >= updatedRule.max_uses;
+          const dateExpired = updatedRule.end_date && asOfDate >= updatedRule.end_date;
+
+          if (usageExceeded || dateExpired) {
+            // Automatically detach from subscription so future cycles stop applying it without manual work
+            execute('UPDATE subscriptions SET discount_rule_id = NULL WHERE id = ?', [sub.id]);
+            execute(
+              'INSERT INTO audit_logs (event_type, description, user_id, metadata_json) VALUES (?, ?, ?, ?)',
+              [
+                'DISCOUNT_AUTO_EXPIRED',
+                `Discount '${updatedRule.code}' reached ${usageExceeded ? 'usage limit' : 'end date'} and was automatically detached from Subscription ${sub.subscription_number}`,
+                operatorUserId || null,
+                JSON.stringify({ subscriptionId: sub.id, ruleId: sub.discount_rule_id, code: updatedRule.code })
+              ]
+            );
+          }
+        }
       }
 
       result.invoicesCreated++;

@@ -151,3 +151,50 @@ analyticsRouter.get('/benchmark', authenticate, requireRole('admin', 'staff'), (
     status: duration < 2000 ? 'PASSED_SUB_2_SECONDS' : 'SLOW'
   });
 });
+
+// CSV Export for Subscriptions (Finance Lead Reporting)
+analyticsRouter.get('/export/subscriptions', authenticate, requireRole('admin', 'staff'), (req: Request, res: Response): void => {
+  const subscriptions = queryAll(`
+    SELECT 
+      s.subscription_number, u.full_name as customer_name, u.email as customer_email,
+      p.name as plan_name, p.billing_interval, s.status, s.start_date, s.expiry_date,
+      s.next_billing_date, s.payment_terms
+    FROM subscriptions s
+    JOIN users u ON s.customer_id = u.id
+    JOIN plans p ON s.plan_id = p.id
+    ORDER BY s.id DESC
+  `);
+
+  let csv = 'Subscription Number,Customer Name,Customer Email,Plan Name,Interval,Status,Start Date,Expiry Date,Next Billing Date,Payment Terms\n';
+  for (const row of subscriptions) {
+    csv += `"${row.subscription_number}","${row.customer_name}","${row.customer_email}","${row.plan_name}","${row.billing_interval}","${row.status}","${row.start_date}","${row.expiry_date || ''}","${row.next_billing_date}","${row.payment_terms}"\n`;
+  }
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="brightloop_subscriptions.csv"');
+  res.send(csv);
+});
+
+// CSV Export for Invoices & Revenue (Finance Lead Reporting)
+analyticsRouter.get('/export/invoices', authenticate, requireRole('admin', 'staff'), (req: Request, res: Response): void => {
+  const invoices = queryAll(`
+    SELECT 
+      i.invoice_number, s.subscription_number, u.full_name as customer_name,
+      i.period_start, i.period_end, i.subtotal, i.tax_amount, i.discount_amount,
+      i.total_amount, i.amount_paid, (i.total_amount - i.amount_paid) as balance_due,
+      i.status, i.issue_date, i.due_date
+    FROM invoices i
+    JOIN users u ON i.customer_id = u.id
+    JOIN subscriptions s ON i.subscription_id = s.id
+    ORDER BY i.id DESC
+  `);
+
+  let csv = 'Invoice Number,Subscription Number,Customer,Period Start,Period End,Subtotal,Tax,Discount,Total,Paid,Balance Due,Status,Issue Date,Due Date\n';
+  for (const row of invoices) {
+    csv += `"${row.invoice_number}","${row.subscription_number}","${row.customer_name}","${row.period_start}","${row.period_end}",${row.subtotal},${row.tax_amount},${row.discount_amount},${row.total_amount},${row.amount_paid},${row.balance_due},"${row.status}","${row.issue_date}","${row.due_date}"\n`;
+  }
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="brightloop_invoices.csv"');
+  res.send(csv);
+});

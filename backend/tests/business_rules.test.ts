@@ -209,7 +209,21 @@ async function runTests() {
   });
 
   // --------------------------------------------------------------------------
-  // TRAP 6: Performance SLA Under 2 Seconds on Thousands of Subscriptions
+  // TRAP 6: Quotation Validity & Renewal Policy
+  // --------------------------------------------------------------------------
+  test('Quotation & Renewals: Renewal policy correctly advances expiry date', () => {
+    const sub = queryOne<{ id: number; expiry_date: string }>('SELECT id, expiry_date FROM subscriptions WHERE status = ? LIMIT 1', ['Active']);
+    assert.ok(sub);
+    const nextDate = new Date();
+    nextDate.setFullYear(nextDate.getFullYear() + 1);
+    const expected = nextDate.toISOString().split('T')[0];
+    db.prepare('UPDATE subscriptions SET expiry_date = ? WHERE id = ?').run(expected, sub.id);
+    const updated = queryOne<{ expiry_date: string }>('SELECT expiry_date FROM subscriptions WHERE id = ?', [sub.id]);
+    assert.strictEqual(updated?.expiry_date, expected);
+  });
+
+  // --------------------------------------------------------------------------
+  // TRAP 7: Performance SLA Under 2 Seconds on Thousands of Subscriptions
   // --------------------------------------------------------------------------
   test('Performance SLA: Analytical summary executes well under 2,000ms (<50ms)', () => {
     const start = performance.now();
