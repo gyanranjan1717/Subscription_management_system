@@ -3,8 +3,9 @@ import { api } from '../services/api.js';
 import { Subscription, Invoice, User } from '../types.js';
 import {
   ShieldCheck, Eye, KeyRound, AlertCircle, CheckCircle2,
-  Lock, RefreshCw, Printer, XCircle, PauseCircle, PlayCircle
+  Lock, RefreshCw, Printer, XCircle, PauseCircle, PlayCircle, History
 } from 'lucide-react';
+import { SubscriptionTimeline } from '../components/SubscriptionTimeline.js';
 
 interface CustomerPortalProps {
   currentUser: User | null;
@@ -16,6 +17,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [timelineSubId, setTimelineSubId] = useState<number | null>(null);
 
   // Password reset testing
   const [resetEmail, setResetEmail] = useState(currentUser?.email || '');
@@ -218,6 +220,12 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                       <PlayCircle className="w-3.5 h-3.5" /> Resume Subscription
                     </button>
                   )}
+                  <button
+                    onClick={() => setTimelineSubId(timelineSubId === s.id ? null : s.id)}
+                    className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-semibold flex items-center gap-1"
+                  >
+                    <History className="w-3.5 h-3.5" /> {timelineSubId === s.id ? 'Hide Activity' : 'Activity'}
+                  </button>
                   {s.status !== 'Closed' && (
                     <button
                       onClick={() => handleClose(s.id)}
@@ -227,6 +235,15 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                     </button>
                   )}
                 </div>
+
+                {timelineSubId === s.id && (
+                  <SubscriptionTimeline
+                    key={`${s.id}-${s.status}-${s.expiry_date}`}
+                    subscriptionId={s.id}
+                    subscriptionNumber={s.subscription_number}
+                    onClose={() => setTimelineSubId(null)}
+                  />
+                )}
               </div>
             ))}
           </div>

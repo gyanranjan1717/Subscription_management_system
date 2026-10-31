@@ -54,7 +54,8 @@ export function queryOne<T = any>(sql: string, params: any[] = []): T | null {
 export function execute(sql: string, params: any[] = []): { changes: number; lastInsertRowid: number | bigint } {
   const db = getDb();
   const stmt = db.prepare(sql);
-  return stmt.run(...params);
+  const result = stmt.run(...params);
+  return { changes: Number(result.changes), lastInsertRowid: result.lastInsertRowid };
 }
 
 export function runTransaction<T>(fn: () => T): T {

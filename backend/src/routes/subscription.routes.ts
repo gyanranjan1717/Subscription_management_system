@@ -3,6 +3,7 @@ import { queryAll, queryOne, execute, runTransaction } from '../db/database.js';
 import { authenticate } from '../middleware/auth.js';
 import { transitionSubscription, SubscriptionStatus } from '../services/stateMachine.js';
 import { computeNextDate } from '../services/billingEngine.js';
+import { buildSubscriptionTimeline } from '../services/timelineService.js';
 
 export const subscriptionRouter = Router();
 
@@ -107,6 +108,32 @@ subscriptionRouter.get('/:id', authenticate, (req: Request, res: Response): void
       lines,
       invoices
     }
+  });
+});
+
+// Activity timeline: status changes, invoices and payments in chronological order
+subscriptionRouter.get('/:id/timeline', authenticate, (req: Request, res: Response): void => {
+  const subId = Number(req.params.id);
+  const sub = queryOne<{ id: number; customer_id: number; subscription_number: string }>(
+    'SELECT id, customer_id, subscription_number FROM subscriptions WHERE id = ?',
+    [subId]
+  );
+
+  if (!sub) {
+    res.status(404).json({ success: false, error: 'Subscription not found' });
+    return;
+  }
+
+  // Customer isolation check
+  if (req.user!.role === 'customer' && sub.customer_id !== req.user!.id) {
+    res.status(403).json({ success: false, error: 'Access denied. You do not own this subscription.' });
+    return;
+  }
+
+  res.json({
+    success: true,
+    subscription_number: sub.subscription_number,
+    timeline: buildSubscriptionTimeline(subId)
   });
 });
 

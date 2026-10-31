@@ -1,6 +1,6 @@
 import {
   User, Product, Plan, TaxRule, DiscountRule, QuotationTemplate,
-  Subscription, Invoice, Payment, DashboardMetrics
+  Subscription, Invoice, Payment, DashboardMetrics, TimelineEvent
 } from '../types.js';
 
 const API_BASE = '/api';
@@ -155,6 +155,10 @@ export const api = {
 
   async renewSubscription(id: number): Promise<any> {
     return request(`/subscriptions/${id}/renew`, { method: 'POST' });
+  },
+
+  async getSubscriptionTimeline(id: number): Promise<{ subscription_number: string; timeline: TimelineEvent[] }> {
+    return request(`/subscriptions/${id}/timeline`);
   },
 
   // Billing

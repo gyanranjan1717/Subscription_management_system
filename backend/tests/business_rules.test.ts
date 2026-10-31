@@ -9,6 +9,7 @@ import { validatePassword } from '../src/middleware/auth.js';
 import { canTransitionSubscription, transitionSubscription } from '../src/services/stateMachine.js';
 import { runBillingCycle } from '../src/services/billingEngine.js';
 import { evaluateDiscount, recordDiscountUsage } from '../src/services/discountEngine.js';
+import { buildSubscriptionTimeline } from '../src/services/timelineService.js';
 
 // Setup isolated database for repeatable deterministic testing
 const __filename = fileURLToPath(import.meta.url);
@@ -220,6 +221,44 @@ async function runTests() {
     db.prepare('UPDATE subscriptions SET expiry_date = ? WHERE id = ?').run(expected, sub.id);
     const updated = queryOne<{ expiry_date: string }>('SELECT expiry_date FROM subscriptions WHERE id = ?', [sub.id]);
     assert.strictEqual(updated?.expiry_date, expected);
+  });
+
+  // --------------------------------------------------------------------------
+  // Activity Timeline: chronological merge of audit logs, invoices and payments
+  // --------------------------------------------------------------------------
+  test('Timeline: merges status changes, invoices and payments in chronological order', () => {
+    const sub = queryOne<{ id: number }>("SELECT id FROM subscriptions WHERE subscription_number = 'SUB-TEST-001'");
+    assert.ok(sub);
+    const inv = queryOne<{ id: number; total_amount: number }>('SELECT id, total_amount FROM invoices WHERE subscription_id = ? LIMIT 1', [sub.id]);
+    assert.ok(inv, 'Billing run must have produced an invoice for SUB-TEST-001');
+
+    const t = transitionSubscription(sub.id, 'Paused');
+    assert.strictEqual(t.success, true);
+    db.prepare(`INSERT INTO payments (invoice_id, amount, payment_method, payment_date) VALUES (?, ?, 'UPI', ?)`).run(inv.id, 100, new Date().toISOString().split('T')[0]);
+
+    const timeline = buildSubscriptionTimeline(sub.id);
+    const types = timeline.map(e => e.type);
+    assert.ok(types.includes('invoice'), 'timeline has invoice event');
+    assert.ok(types.includes('payment'), 'timeline has payment event');
+    assert.ok(timeline.some(e => e.type === 'status_change' && e.from === 'Active' && e.to === 'Paused'), 'timeline has Active -> Paused');
+
+    const keys = timeline.map(e => (e.timestamp.length === 10 ? `${e.timestamp} 00:00:00` : e.timestamp.replace('T', ' ').slice(0, 19)));
+    assert.deepStrictEqual(keys, [...keys].sort(), 'events must be in chronological order');
+  });
+
+  test('Timeline: never leaks events belonging to another subscription', () => {
+    const subs = queryAll<{ id: number }>("SELECT id FROM subscriptions WHERE subscription_number IN ('SUB-TEST-002', 'SUB-TEST-003')");
+    const sub1 = queryOne<{ id: number }>("SELECT id FROM subscriptions WHERE subscription_number = 'SUB-TEST-001'");
+    assert.ok(sub1 && subs.length === 2);
+    const own = new Set(queryAll<{ id: number }>('SELECT id FROM invoices WHERE subscription_id = ?', [sub1.id]).map(i => `invoice-${i.id}`));
+    for (const e of buildSubscriptionTimeline(sub1.id)) {
+      if (e.type === 'invoice') assert.ok(own.has(e.id), `foreign invoice event ${e.id} leaked`);
+      assert.ok(!e.title.includes('SUB-TEST-002'));
+    }
+    // A subscription with no activity yields an empty timeline
+    const quiet = queryOne<{ id: number }>("SELECT id FROM subscriptions WHERE subscription_number = 'SUB-BENCH-500'");
+    assert.ok(quiet);
+    assert.deepStrictEqual(buildSubscriptionTimeline(quiet.id), []);
   });
 
   // --------------------------------------------------------------------------

@@ -216,3 +216,14 @@ export interface DashboardMetrics {
     slaMet: boolean;
   };
 }
+
+export interface TimelineEvent {
+  id: string;
+  type: 'status_change' | 'renewal' | 'invoice' | 'invoice_status' | 'payment' | 'other';
+  title: string;
+  description: string;
+  timestamp: string;
+  amount?: number;
+  from?: string;
+  to?: string;
+}
