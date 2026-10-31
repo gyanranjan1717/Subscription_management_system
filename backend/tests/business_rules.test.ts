@@ -1,14 +1,80 @@
 import assert from 'assert';
+import { DatabaseSync } from 'node:sqlite';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import bcrypt from 'bcryptjs';
 import { getDb, queryAll, queryOne } from '../src/db/database.js';
 import { validatePassword } from '../src/middleware/auth.js';
 import { canTransitionSubscription, transitionSubscription } from '../src/services/stateMachine.js';
 import { runBillingCycle } from '../src/services/billingEngine.js';
 import { evaluateDiscount, recordDiscountUsage } from '../src/services/discountEngine.js';
 
+// Setup isolated database for repeatable deterministic testing
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 async function runTests() {
   console.log('===============================================================');
   console.log(' STARTING BRIGHTLOOP VERIFICATION & TRAP TEST SUITE');
   console.log('===============================================================');
+
+  // Reset and re-seed the test database cleanly
+  const db = getDb();
+  db.exec(`
+    DELETE FROM payments;
+    DELETE FROM invoice_lines;
+    DELETE FROM invoices;
+    DELETE FROM subscription_lines;
+    DELETE FROM subscriptions;
+    DELETE FROM quotation_template_lines;
+    DELETE FROM quotation_templates;
+    DELETE FROM discount_rules;
+    DELETE FROM plans;
+    DELETE FROM product_variants;
+    DELETE FROM products;
+    DELETE FROM tax_rules;
+    DELETE FROM password_resets;
+    DELETE FROM audit_logs;
+    DELETE FROM users;
+    DELETE FROM sqlite_sequence;
+  `);
+
+  const salt = await bcrypt.genSalt(10);
+  const adminPass = await bcrypt.hash('Brightloop#2026', salt);
+  const custPass = await bcrypt.hash('Customer#2026', salt);
+
+  const adminRes = db.prepare(`INSERT INTO users (email, password_hash, full_name, role) VALUES (?, ?, ?, 'admin')`).run('admin@brightloop.com', adminPass, 'Alex Admin');
+  const custRes = db.prepare(`INSERT INTO users (email, password_hash, full_name, role) VALUES (?, ?, ?, 'customer')`).run('acme@corp.com', custPass, 'Acme Corp');
+  const custId = Number(custRes.lastInsertRowid);
+
+  const taxRes = db.prepare(`INSERT INTO tax_rules (name, rate_percentage, is_default, is_active) VALUES ('GST 18%', 18.0, 1, 1)`).run();
+  const taxId = Number(taxRes.lastInsertRowid);
+
+  const prodRes = db.prepare(`INSERT INTO products (name, type, sales_price, cost_price) VALUES ('Brightloop Cloud ERP', 'software', 1200.0, 300.0)`).run();
+  const prodId = Number(prodRes.lastInsertRowid);
+
+  db.prepare(`INSERT INTO product_variants (product_id, attribute_name, option_name, price_extra) VALUES (?, 'Brand', 'Standard', 0.0), (?, 'Brand', 'Odoo Edition', 560.0)`).run(prodId, prodId);
+
+  const planRes = db.prepare(`INSERT INTO plans (name, billing_interval, price, min_quantity, auto_close, can_pause, can_renew) VALUES ('Monthly Plan', 'monthly', 1200.0, 1, 0, 1, 1)`).run();
+  const planId = Number(planRes.lastInsertRowid);
+
+  const discRes = db.prepare(`INSERT INTO discount_rules (code, description, discount_type, value, min_amount, min_quantity, start_date, end_date, max_uses, current_uses, applies_to) VALUES ('SEATS20', '20% off', 'percentage', 20.0, 0, 5, '2026-01-01', '2027-12-31', 100, 0, 'all')`).run();
+  const discId = Number(discRes.lastInsertRowid);
+
+  db.prepare(`INSERT INTO discount_rules (code, description, discount_type, value, min_amount, min_quantity, start_date, end_date, max_uses, current_uses, applies_to) VALUES ('EXPIRED10', 'Expired', 'percentage', 10.0, 0, 0, '2025-01-01', '2025-06-30', 10, 10, 'all')`).run();
+
+  const today = new Date().toISOString().split('T')[0];
+  for (let i = 1; i <= 3; i++) {
+    const s = db.prepare(`INSERT INTO subscriptions (subscription_number, customer_id, plan_id, status, start_date, next_billing_date, payment_terms) VALUES (?, ?, ?, 'Active', ?, ?, 'Immediate')`).run(`SUB-TEST-00${i}`, custId, planId, today, today);
+    const sId = Number(s.lastInsertRowid);
+    db.prepare(`INSERT INTO subscription_lines (subscription_id, product_id, quantity, unit_price, tax_id, line_amount) VALUES (?, ?, 1, 1200.0, ?, 1200.0)`).run(sId, prodId, taxId);
+  }
+
+  // Seed 1,000 benchmark records for SLA verification
+  for (let i = 4; i <= 1003; i++) {
+    db.prepare(`INSERT INTO subscriptions (subscription_number, customer_id, plan_id, status, start_date, next_billing_date, payment_terms) VALUES (?, ?, ?, 'Active', '2026-01-01', '2026-12-01', '30 Days Net')`).run(`SUB-BENCH-${i}`, custId, planId);
+  }
 
   let passed = 0;
   let total = 0;
