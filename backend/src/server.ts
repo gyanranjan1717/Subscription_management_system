@@ -9,7 +9,7 @@ import { authRouter } from './routes/auth.routes.js';
 import { catalogRouter } from './routes/catalog.routes.js';
 import { subscriptionRouter } from './routes/subscription.routes.js';
 import { billingRouter } from './routes/billing.routes.js';
-import { paymentRouter } from './routes/payment.routes.js';
+import { paymentRouter, razorpayWebhookRouter } from './routes/payment.routes.js';
 import { analyticsRouter } from './routes/analytics.routes.js';
 
 dotenv.config();
@@ -24,7 +24,11 @@ export function createApp() {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
   }));
-  app.use(express.json({ limit: '100kb' }));
+  app.use(express.json({
+    limit: '100kb',
+    // Webhook signatures are computed over the exact bytes Razorpay sent, so keep them.
+    verify: (req, _res, buf) => { (req as Request & { rawBody?: Buffer }).rawBody = buf; }
+  }));
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-store');
@@ -49,6 +53,7 @@ export function createApp() {
   app.use('/api/catalog', catalogRouter);
   app.use('/api/subscriptions', subscriptionRouter);
   app.use('/api/billing', billingRouter);
+  app.use('/api/payments/razorpay/webhook', razorpayWebhookRouter);
   app.use('/api/payments', paymentRouter);
   app.use('/api/analytics', analyticsRouter);
 

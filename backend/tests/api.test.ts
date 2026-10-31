@@ -20,16 +20,22 @@ before(async () => {
 });
 after(closeServer);
 
+/** Sign-up always goes through email verification: request a code, then register with it. */
+async function signUp(body: Record<string, unknown>) {
+  const sent = await api('POST', '/auth/send-otp', null, { email: body.email });
+  return api('POST', '/auth/register', null, { ...body, otp: sent.body?.otpPreview });
+}
+
 // ---- auth ----------------------------------------------------------------------------------------
 
 test('auth: sign-up creates a customer, logs in, and rejects a duplicate email in any letter case with 409', async () => {
-  const reg = await api('POST', '/auth/register', null, { email: 'New.User@Example.com', password: 'Abcdefgh!', full_name: 'New User' });
+  const reg = await signUp({ email: 'New.User@Example.com', password: 'Abcdefgh!', full_name: 'New User' });
   assert.equal(reg.status, 201);
   assert.equal(reg.body.user.role, 'customer');
   assert.equal(reg.body.user.email, 'new.user@example.com');
 
-  const dup = await api('POST', '/auth/register', null, { email: 'NEW.USER@example.COM', password: 'Abcdefgh!', full_name: 'Dup' });
-  assert.equal(dup.status, 409);
+  const dup = await api('POST', '/auth/send-otp', null, { email: 'NEW.USER@example.COM' });
+  assert.equal(dup.status, 409, 'an address that already has an account cannot even request a sign-up code');
 
   // The database index, not just the route, enforces it.
   assert.throws(() => execute("INSERT INTO users (email, password_hash, full_name, role) VALUES ('NEW.user@example.com', 'x', 'x', 'customer')"), /UNIQUE/);
@@ -45,10 +51,10 @@ test('auth: sign-up creates a customer, logs in, and rejects a duplicate email i
 
 test('auth: sign-up enforces the password policy and cannot request a role', async () => {
   for (const password of ['Abcdefg!', 'abcdefgh!', 'ABCDEFGH!', 'Abcdefghi']) {
-    const r = await api('POST', '/auth/register', null, { email: `p${password.length}${password[0]}@x.com`, password, full_name: 'X' });
+    const r = await signUp({ email: `p${password.length}${password[0]}@x.com`, password, full_name: 'X' });
     assert.equal(r.status, 400, `rejects ${password}`);
   }
-  const sneaky = await api('POST', '/auth/register', null, { email: 'sneaky@x.com', password: 'Abcdefgh!', full_name: 'S', role: 'admin' });
+  const sneaky = await signUp({ email: 'sneaky@x.com', password: 'Abcdefgh!', full_name: 'S', role: 'admin' });
   assert.equal(sneaky.status, 201);
   assert.equal(sneaky.body.user.role, 'customer');
   assert.equal(queryOne<any>("SELECT role FROM users WHERE email = 'sneaky@x.com'").role, 'customer');

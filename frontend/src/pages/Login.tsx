@@ -488,7 +488,7 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
                         className="w-full px-2.5 py-1.5 text-xs border border-amber-300 rounded bg-white font-mono focus:ring-2 focus:ring-amber-500 outline-none"
                       />
                       <p className="text-[10px] text-amber-700 mt-1">
-                        Default master key: <code className="bg-amber-100 px-1 py-0.5 rounded font-mono">BrightloopAdminKey#2026</code>
+                        Ask your system owner for the key (set as ADMIN_REGISTRATION_KEY on the server).
                       </p>
                     </div>
                   )}
@@ -528,7 +528,7 @@ export const Login: React.FC<LoginProps> = ({ onLoggedIn }) => {
                     <div className="flex items-center justify-between">
                       <span className="font-semibold flex items-center gap-1">
                         <Sparkles className="w-3.5 h-3.5 text-brand-600" />
-                        Code sent to outbox:
+                        Local demo mode (no email server):
                       </span>
                       <button
                         type="button"

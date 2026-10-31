@@ -6,7 +6,7 @@ import { validatePassword, generateToken, authenticate, requireRole, rateLimit, 
 import { conflict, badRequest, handle, isUniqueViolation } from '../lib/errors.js';
 import { asBody, email as emailField, reqStr, str } from '../lib/validation.js';
 import { audit } from '../services/audit.js';
-import { sendEmail } from '../services/mailer.js';
+import { appUrl, queueEmail, smtpConfigured } from '../services/mailer.js';
 
 export const authRouter = Router();
 
@@ -16,14 +16,13 @@ const GENERIC_RESET_MESSAGE = 'If the email is registered, a password reset link
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
 const exposeResetLink = () =>
-  process.env.EXPOSE_RESET_LINK ? process.env.EXPOSE_RESET_LINK === 'true' : process.env.NODE_ENV !== 'production';
+  process.env.EXPOSE_RESET_LINK ? process.env.EXPOSE_RESET_LINK === 'true' : process.env.NODE_ENV !== 'production' && !smtpConfigured();
+
 
 function limit(req: Request, scope: string, email: string): void {
   const max = Number(process.env.AUTH_RATE_LIMIT_MAX || 30);
   rateLimit(`${scope}:${req.ip}:${email}`, max, 15 * 60 * 1000);
 }
-
-const ADMIN_REGISTRATION_KEY = process.env.ADMIN_REGISTRATION_KEY || 'BrightloopAdminKey#2026';
 
 async function createUser(
   role: 'customer' | 'staff' | 'admin',
@@ -52,103 +51,101 @@ async function createUser(
   }
 }
 
-// Send OTP to email for verification
+// ---- Email verification (OTP) -----------------------------------------------------------------
+
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+
+/** Codes are only echoed back in non-production when no SMTP server is configured (local demo "inbox"). */
+const exposeDevCodes = () =>
+  process.env.NODE_ENV !== 'production' && !smtpConfigured() && process.env.EXPOSE_DEV_CODES !== 'false';
+
+/** Admin self-registration exists only when the operator sets a strong key in the environment. */
+function adminKeyMatches(candidate: string): boolean {
+  const configured = process.env.ADMIN_REGISTRATION_KEY;
+  if (!configured || configured.length < 16) return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(configured);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Checks a code against the newest active one for the email. Wrong guesses are counted and the code
+ * dies after OTP_MAX_ATTEMPTS, so six digits cannot be brute-forced. Returns the row id when valid.
+ */
+function checkOtp(email: string, code: string): number | null {
+  const row = queryOne<{ id: number; otp_code: string; expires_at: string; attempts: number }>(
+    'SELECT id, otp_code, expires_at, attempts FROM email_otps WHERE lower(email) = ? AND used = 0 ORDER BY id DESC LIMIT 1',
+    [email]
+  );
+  if (!row || row.attempts >= OTP_MAX_ATTEMPTS || Date.parse(row.expires_at) <= Date.now()) return null;
+  const given = Buffer.from(sha256(code));
+  const stored = Buffer.from(row.otp_code);
+  if (given.length === stored.length && crypto.timingSafeEqual(given, stored)) return row.id;
+  execute('UPDATE email_otps SET attempts = attempts + 1 WHERE id = ?', [row.id]);
+  return null;
+}
+
 authRouter.post('/send-otp', handle(async (req, res) => {
   const b = asBody(req.body);
   const email = emailField(b);
-
-  // Check if user already exists
-  const existing = queryOne('SELECT id FROM users WHERE lower(email) = ?', [email]);
-  if (existing) {
-    throw conflict('An account with this email already exists.');
-  }
-
   limit(req, 'otp', email);
 
-  // Generate 6-digit cryptographic OTP
-  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  // An address that already has an account is told so (sign-up must say "one account per email").
+  const existing = queryOne('SELECT id FROM users WHERE lower(email) = ?', [email]);
+  if (existing) throw conflict('An account with this email already exists. Sign in instead.');
+
+  const otpCode = crypto.randomInt(100000, 1000000).toString();
+  const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
 
   runTransaction(() => {
     execute('UPDATE email_otps SET used = 1 WHERE lower(email) = ? AND used = 0', [email]);
-    execute('INSERT INTO email_otps (email, otp_code, expires_at) VALUES (?, ?, ?)', [email, otpCode, expiresAt]);
-    execute(
-      'INSERT INTO email_outbox (to_email, subject, body, kind, related_id) VALUES (?, ?, ?, ?, ?)',
-      [email, 'Your Brightloop Verification Code', `Your 6-digit verification code is: ${otpCode}. It expires in 10 minutes.`, 'RESET', null]
-    );
-    audit('OTP_DISPATCHED', `Verification OTP generated for ${email}`, null, { email });
+    execute('INSERT INTO email_otps (email, otp_code, expires_at) VALUES (?, ?, ?)', [email, sha256(otpCode), expiresAt]);
+    queueEmail({
+      to: email,
+      subject: 'Your Brightloop verification code',
+      text: `Your Brightloop verification code is ${otpCode}.
+It expires in 10 minutes. If you did not request it, you can ignore this email.`,
+      kind: 'OTP'
+    });
+    audit('OTP_DISPATCHED', `Verification code sent to ${email}`, null, { email });
   });
-
-  // Dispatch real email if SMTP configured (runs asynchronously)
-  sendEmail({
-    to: email,
-    subject: 'Your Brightloop Verification Code',
-    text: `Your 6-digit Brightloop verification code is: ${otpCode}. It expires in 10 minutes.`,
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
-        <h2 style="color: #0f172a; margin-bottom: 8px;">Brightloop Account Verification</h2>
-        <p style="color: #475569; font-size: 14px;">Use the following 6-digit code to complete your registration:</p>
-        <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; padding: 16px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1e293b; margin: 20px 0;">
-          ${otpCode}
-        </div>
-        <p style="color: #64748b; font-size: 12px;">This code will expire in 10 minutes. If you did not request this, you can safely ignore this email.</p>
-      </div>
-    `
-  }).catch(() => {});
 
   res.json({
     success: true,
     message: `Verification code sent to ${email}`,
-    otpPreview: otpCode
+    ...(exposeDevCodes() ? { otpPreview: otpCode } : {})
   });
 }));
 
-// Verify OTP
 authRouter.post('/verify-otp', handle(async (req, res) => {
   const b = asBody(req.body);
-  const email = typeof b.email === 'string' ? b.email.trim().toLowerCase() : '';
+  const email = emailField(b);
   const otp = typeof b.otp === 'string' ? b.otp.trim() : '';
-  if (!email || !otp) throw badRequest('Email and OTP code are required.');
-
-  const row = queryOne<{ id: number }>(
-    'SELECT id FROM email_otps WHERE lower(email) = ? AND otp_code = ? AND used = 0 AND expires_at > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1',
-    [email, otp]
-  );
-  if (!row) {
-    throw badRequest('Invalid or expired verification code.');
-  }
-
+  if (!otp) throw badRequest('Email and OTP code are required.');
+  limit(req, 'verify', email);
+  if (checkOtp(email, otp) === null) throw badRequest('Invalid or expired verification code.');
   res.json({ success: true, message: 'Email verified successfully.' });
 }));
 
-// Public sign-up: creates a customer by default.
-// Only creates an admin if a valid admin_key is provided matching ADMIN_REGISTRATION_KEY.
-// Passing { role: 'admin' } directly without a valid admin_key is strictly ignored.
+// Public sign-up creates a customer, and only after the emailed code is proven.
+// Admin accounts can be self-registered only with the operator's ADMIN_REGISTRATION_KEY (env, 16+ chars).
 authRouter.post('/register', handle(async (req, res) => {
   const b = asBody(req.body);
-  const email = typeof b.email === 'string' ? b.email.trim().toLowerCase() : '';
+  const email = emailField(b);
   const otp = typeof b.otp === 'string' ? b.otp.trim() : '';
   const adminKey = typeof b.admin_key === 'string' ? b.admin_key.trim() : '';
+  limit(req, 'register', email);
 
-  if (adminKey && adminKey !== ADMIN_REGISTRATION_KEY) {
-    throw badRequest('Invalid Admin Secret Key.');
-  }
+  if (adminKey && !adminKeyMatches(adminKey)) throw badRequest('Invalid admin key.');
+  const role: 'customer' | 'admin' = adminKey ? 'admin' : 'customer';
 
-  const role: 'customer' | 'admin' = (adminKey && adminKey === ADMIN_REGISTRATION_KEY) ? 'admin' : 'customer';
+  if (!otp) throw badRequest('Verify your email first: enter the code we sent you.');
+  const otpId = checkOtp(email, otp);
+  if (otpId === null) throw badRequest('Invalid or expired verification code.');
 
-  // If OTP is provided, verify it and mark it used
-  if (otp) {
-    const validOtp = queryOne<{ id: number }>(
-      'SELECT id FROM email_otps WHERE lower(email) = ? AND otp_code = ? AND used = 0 AND expires_at > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1',
-      [email, otp]
-    );
-    if (!validOtp) {
-      throw badRequest('Invalid or expired verification code.');
-    }
-    execute('UPDATE email_otps SET used = 1 WHERE id = ?', [validOtp.id]);
-  }
-
-  const user = await createUser(role, b, null);
+  const user = await createUser(role, { ...b, email }, null);
+  execute('UPDATE email_otps SET used = 1 WHERE id = ?', [otpId]);
   audit('USER_REGISTERED', `User registered with role ${user.role}`, user.id, { role: user.role });
 
   res.status(201).json({
@@ -203,28 +200,19 @@ authRouter.post('/forgot-password', handle(async (req, res) => {
     runTransaction(() => {
       execute('UPDATE password_resets SET used = 1 WHERE user_id = ? AND used = 0', [user.id]); // older links die
       execute('INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (?, ?, ?)', [user.id, sha256(token), expiresAt]);
-      execute(
-        'INSERT INTO email_outbox (to_email, subject, body, kind, related_id) VALUES (?, ?, ?, ?, ?)',
-        [user.email, 'Reset your Brightloop password', `Use this link within 30 minutes: ${resetUrl}`, 'RESET', user.id]
-      );
+      queueEmail({
+        to: user.email,
+        subject: 'Reset your Brightloop password',
+        text: `We received a request to reset your Brightloop password.
+Open this link within 30 minutes to choose a new one:
+${appUrl()}${resetUrl}
+
+If you did not ask for this, you can ignore this email.`,
+        kind: 'RESET',
+        relatedId: user.id
+      });
       audit('PASSWORD_RESET_DISPATCHED', `Password reset email queued for ${user.email}`, user.id, { expiresAt });
     });
-
-    sendEmail({
-      to: user.email,
-      subject: 'Reset your Brightloop password',
-      text: `Use this link within 30 minutes to reset your password: http://localhost:3000${resetUrl}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 8px;">
-          <h2 style="color: #0f172a; margin-bottom: 8px;">Reset Your Password</h2>
-          <p style="color: #475569; font-size: 14px;">You requested a password reset for your Brightloop account.</p>
-          <div style="margin: 20px 0; text-align: center;">
-            <a href="http://localhost:3000${resetUrl}" style="background-color: #0284c7; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Reset Password</a>
-          </div>
-          <p style="color: #64748b; font-size: 12px;">Token: <code>${token}</code> (Expires in 30 minutes)</p>
-        </div>
-      `
-    }).catch(() => {});
 
     // Dev convenience only (the "inbox"): never enabled in production.
     if (exposeResetLink()) {
@@ -301,5 +289,5 @@ authRouter.get('/outbox', authenticate, requireRole('admin'), (_req: Request, re
     res.status(404).json({ success: false, error: 'Resource not found.' });
     return;
   }
-  res.json({ success: true, emails: queryAll('SELECT id, to_email, subject, body, kind, created_at FROM email_outbox ORDER BY id DESC LIMIT 50') });
+  res.json({ success: true, emails: queryAll('SELECT id, to_email, subject, body, kind, delivery_status, delivery_error, created_at FROM email_outbox ORDER BY id DESC LIMIT 50') });
 });

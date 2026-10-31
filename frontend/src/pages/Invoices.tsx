@@ -6,7 +6,7 @@ import {
   Alert, Button, Card, ConfirmDialog, EmptyState, ErrorState, Input, Loading, Modal, PageHeader, Select, StatusBadge, table, useToast, cx
 } from '../components/ui.js';
 import { formatDate, formatMoney } from '../lib/format.js';
-import { Download, Printer, Send } from 'lucide-react';
+import { BellRing, Download, Printer, Send } from 'lucide-react';
 
 interface InvoicesProps {
   initialInvoiceId?: number | null;
@@ -125,6 +125,17 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
     setBusyId(inv.id);
     try {
       toast('success', (await api.sendInvoice(inv.id)).message);
+    } catch (err: any) {
+      toast('error', err.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remindInvoice = async (inv: Invoice) => {
+    setBusyId(inv.id);
+    try {
+      toast('success', (await api.remindInvoice(inv.id)).message);
     } catch (err: any) {
       toast('error', err.message);
     } finally {
@@ -284,7 +295,8 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
           footer={
             <>
               <Button onClick={() => window.print()}><Printer className="w-3.5 h-3.5" aria-hidden="true" /> Print / PDF</Button>
-              {isStaff && <Button loading={busyId === detail.id} onClick={() => sendInvoice(detail)}><Send className="w-3.5 h-3.5" aria-hidden="true" /> Send to customer</Button>}
+              {isStaff && detail.status !== 'Draft' && detail.status !== 'Cancelled' && <Button loading={busyId === detail.id} onClick={() => sendInvoice(detail)}><Send className="w-3.5 h-3.5" aria-hidden="true" /> Send to customer</Button>}
+              {isStaff && detail.status === 'Confirmed' && detail.amount_paid < detail.total_amount && <Button loading={busyId === detail.id} onClick={() => remindInvoice(detail)}><BellRing className="w-3.5 h-3.5" aria-hidden="true" /> Send reminder</Button>}
               {isStaff && ['Draft', 'Confirmed'].includes(detail.status) && detail.amount_paid === 0 && <Button variant="danger" onClick={() => setCancelTarget(detail)}>Cancel invoice</Button>}
               {isStaff && detail.status === 'Draft' && <Button variant="primary" loading={busyId === detail.id} onClick={() => confirmInvoice(detail)}>Confirm invoice</Button>}
               {canPay(detail) && <Button variant="primary" onClick={() => openPay(detail)}>Record payment</Button>}

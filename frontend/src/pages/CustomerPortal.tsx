@@ -4,6 +4,7 @@ import { Subscription, Invoice, Payment, User } from '../types.js';
 import { SubscriptionTimeline } from '../components/SubscriptionTimeline.js';
 import { Alert, Button, Card, ConfirmDialog, EmptyState, ErrorState, Input, Loading, Modal, PageHeader, Stat, StatusBadge, table, useToast } from '../components/ui.js';
 import { formatDate, formatMoney } from '../lib/format.js';
+import { payWithRazorpay } from '../lib/razorpay.js';
 import { Printer, CreditCard, ShieldCheck } from 'lucide-react';
 
 interface CustomerPortalProps {
@@ -25,14 +26,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
   const [timelineFor, setTimelineFor] = useState<Subscription | null>(null);
   const [closeTarget, setCloseTarget] = useState<Subscription | null>(null);
 
-  // Razorpay Checkout Modal
-  const [razorpayOrder, setRazorpayOrder] = useState<{
-    orderId: string;
-    invoiceId: number;
-    invoiceNumber: string;
-    amountInr: number;
-    keyId: string;
-  } | null>(null);
+  // Online payment (Razorpay Checkout)
+  const [payEnabled, setPayEnabled] = useState(false);
+  const [payInvoice, setPayInvoice] = useState<Invoice | null>(null);
+  const [payAmount, setPayAmount] = useState('');
+  const [payError, setPayError] = useState<string | null>(null);
   const [payingBusy, setPayingBusy] = useState(false);
 
   const [resetStep, setResetStep] = useState<ResetStep>('idle');
@@ -60,6 +58,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
 
   useEffect(() => {
     loadData();
+    api.getRazorpayConfig().then(c => setPayEnabled(c.enabled)).catch(() => setPayEnabled(false));
   }, [currentUser?.id]);
 
   const act = async (sub: Subscription, label: string, fn: () => Promise<{ message: string }>) => {
@@ -76,31 +75,42 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
     }
   };
 
-  const startRazorpayPayment = async (inv: Invoice) => {
-    try {
-      const order = await api.createRazorpayOrder(inv.id);
-      setRazorpayOrder(order);
-    } catch (err: any) {
-      toast('error', 'Unable to initiate Razorpay checkout. ' + err.message);
-    }
+  const balanceOf = (inv: Invoice) => inv.balance_due ?? inv.total_amount - inv.amount_paid;
+
+  const openPayment = (inv: Invoice) => {
+    setPayInvoice(inv);
+    setPayAmount(balanceOf(inv).toFixed(2));
+    setPayError(null);
   };
 
-  const handleCompleteRazorpay = async () => {
-    if (!razorpayOrder) return;
+  const closePayment = () => {
+    if (!payingBusy) setPayInvoice(null);
+  };
+
+  /** Server fixes the amount and creates the order; Razorpay takes the money; the server verifies the signature. */
+  const payOnline = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payInvoice) return;
     setPayingBusy(true);
+    setPayError(null);
     try {
-      const mockPaymentId = `pay_${Date.now()}`;
-      await api.verifyRazorpayPayment({
-        invoice_id: razorpayOrder.invoiceId,
-        razorpay_order_id: razorpayOrder.orderId,
-        razorpay_payment_id: mockPaymentId,
-        razorpay_signature: 'test_signature_verified'
-      });
-      toast('success', `Payment received! Invoice ${razorpayOrder.invoiceNumber} is now marked as Paid.`);
-      setRazorpayOrder(null);
-      await loadData();
+      const full = Number(payAmount) === balanceOf(payInvoice);
+      const order = await api.createRazorpayOrder(payInvoice.id, full ? undefined : payAmount);
+      const checkout = await payWithRazorpay(order);
+      try {
+        const res = await api.verifyRazorpayPayment(checkout);
+        toast('success', res.payment.status === 'Paid'
+          ? `Payment received. Invoice ${res.payment.invoiceNumber} is paid in full.`
+          : `Payment received. ${formatMoney(res.payment.balanceRemaining)} is still outstanding on ${res.payment.invoiceNumber}.`);
+        setPayInvoice(null);
+        await loadData();
+      } catch (err: any) {
+        // The charge went through at the gateway; the server will also settle it from Razorpay's own notification.
+        setPayError(`We could not confirm your payment yet: ${err.message} If money was debited, it will be applied to the invoice automatically.`);
+        await loadData();
+      }
     } catch (err: any) {
-      toast('error', 'Payment verification failed. ' + err.message);
+      setPayError(err.message);
     } finally {
       setPayingBusy(false);
     }
@@ -245,13 +255,13 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
                           <td className={table.td}><StatusBadge status={inv.status} overdue={!!inv.is_overdue} partial={inv.amount_paid > 0 && balance > 0} /></td>
                           <td className={table.tdNum}>
                             <div className="flex justify-end gap-1.5 whitespace-nowrap">
-                              {inv.status === 'Confirmed' && balance > 0 && (
+                              {payEnabled && inv.status === 'Confirmed' && balance > 0 && (
                                 <button
                                   type="button"
-                                  onClick={() => startRazorpayPayment(inv)}
+                                  onClick={() => openPayment(inv)}
                                   className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
                                 >
-                                  <CreditCard className="w-3.5 h-3.5" /> Pay Online
+                                  <CreditCard className="w-3.5 h-3.5" aria-hidden="true" /> Pay online
                                 </button>
                               )}
                               <button
@@ -318,63 +328,53 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({ currentUser, onV
         </>
       )}
 
-      {/* Razorpay Online Payment Checkout Modal */}
-      {razorpayOrder && (
-        <Modal
-          title="Razorpay Secure Checkout"
-          size="md"
-          onClose={() => setRazorpayOrder(null)}
-          footer={
-            <>
-              <Button onClick={() => setRazorpayOrder(null)}>Cancel</Button>
-              <Button
-                variant="primary"
-                loading={payingBusy}
-                onClick={handleCompleteRazorpay}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5"
-              >
-                <CreditCard className="w-4 h-4" /> Pay {formatMoney(razorpayOrder.amountInr)}
-              </Button>
-            </>
-          }
-        >
-          <div className="space-y-4">
-            <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200 rounded-lg">
-              <div>
-                <div className="text-xs text-slate-500">Invoice Reference</div>
-                <div className="font-semibold text-slate-900">{razorpayOrder.invoiceNumber}</div>
-              </div>
-              <div className="text-right">
-                <div className="text-xs text-slate-500">Amount Due</div>
-                <div className="text-lg font-bold text-emerald-600">{formatMoney(razorpayOrder.amountInr)}</div>
-              </div>
-            </div>
-
-            <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 space-y-1">
-              <div className="font-semibold flex items-center gap-1">
-                <ShieldCheck className="w-4 h-4 text-blue-600" /> Razorpay 256-Bit Encrypted Gateway
-              </div>
-              <div className="text-slate-600">Gateway Key: <code className="font-mono bg-blue-100 px-1 py-0.5 rounded">{razorpayOrder.keyId}</code></div>
-              <div className="text-slate-600">Order ID: <code className="font-mono bg-blue-100 px-1 py-0.5 rounded">{razorpayOrder.orderId}</code></div>
-            </div>
-
-            <div className="space-y-2 text-xs">
-              <label className="font-medium text-slate-700 block">Payment Method</label>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="p-2.5 border-2 border-emerald-500 bg-emerald-50/50 rounded-lg text-center font-medium text-emerald-900">
-                  UPI / QR Code
+      {payInvoice && (() => {
+        const balance = balanceOf(payInvoice);
+        const amount = Number(payAmount);
+        const valid = Number.isFinite(amount) && amount >= 1 && amount <= balance + 1e-9;
+        return (
+          <Modal
+            title={`Pay invoice ${payInvoice.invoice_number}`}
+            size="md"
+            onClose={closePayment}
+            footer={
+              <>
+                <Button onClick={closePayment} disabled={payingBusy}>Cancel</Button>
+                <Button variant="primary" type="submit" form="pay-form" loading={payingBusy} disabled={!valid}>
+                  <CreditCard className="w-4 h-4" aria-hidden="true" /> Pay {valid ? formatMoney(amount) : ''} securely
+                </Button>
+              </>
+            }
+          >
+            <form id="pay-form" onSubmit={payOnline} className="space-y-4">
+              {payError && <Alert kind="error">{payError}</Alert>}
+              <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-sm">
+                <div>
+                  <div className="text-xs text-slate-500">Outstanding balance</div>
+                  <div className="text-lg font-semibold text-slate-900">{formatMoney(balance)}</div>
                 </div>
-                <div className="p-2.5 border border-slate-200 rounded-lg text-center font-medium text-slate-700">
-                  Credit / Debit Card
-                </div>
-                <div className="p-2.5 border border-slate-200 rounded-lg text-center font-medium text-slate-700">
-                  Net Banking
+                <div className="text-right text-xs text-slate-500">
+                  <div>Invoice total {formatMoney(payInvoice.total_amount)}</div>
+                  <div>Already paid {formatMoney(payInvoice.amount_paid)}</div>
                 </div>
               </div>
-            </div>
-          </div>
-        </Modal>
-      )}
+              <Input
+                label="Amount to pay (INR)"
+                inputMode="decimal"
+                required
+                value={payAmount}
+                onChange={e => setPayAmount(e.target.value)}
+                hint="Pay the full balance, or part of it. The rest stays outstanding."
+                error={payAmount && !valid ? `Enter an amount between 1.00 and ${balance.toFixed(2)}.` : undefined}
+              />
+              <p className="flex items-start gap-1.5 text-xs text-slate-500">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" aria-hidden="true" />
+                You pay on Razorpay's secure page with UPI, card or net banking. We never see your card details.
+              </p>
+            </form>
+          </Modal>
+        );
+      })()}
 
       {timelineFor && (
         <Modal title={`Activity for ${timelineFor.subscription_number}`} size="lg" onClose={() => setTimelineFor(null)}>

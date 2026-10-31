@@ -1,16 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api.js';
-import { DashboardMetrics } from '../types.js';
+import { DashboardMetrics, TrendPoint } from '../types.js';
+import { TrendChart } from '../components/TrendChart.js';
 import { Alert, Button, Card, EmptyState, ErrorState, Input, Loading, PageHeader, Stat, StatusBadge, table, useToast } from '../components/ui.js';
 import { addDaysIso, formatDate, formatDateTime, formatMoney, today } from '../lib/format.js';
-import { Download, PlayCircle, RefreshCw, Send } from 'lucide-react';
+import { BellRing, Download, PlayCircle, RefreshCw } from 'lucide-react';
 
 interface DashboardProps {
   onNavigateToInvoice: (invoiceId: number) => void;
   onNavigateToBilling: () => void;
 }
 
-type Data = { metrics: DashboardMetrics; planBreakdown: any[]; overdueInvoices: any[]; recentEvents: any[] };
+type Data = { metrics: DashboardMetrics; planBreakdown: any[]; trend: TrendPoint[]; overdueInvoices: any[]; recentEvents: any[] };
 
 const PRESETS: Array<{ label: string; range: () => { from: string; to: string } | null }> = [
   { label: 'All time', range: () => null },
@@ -33,6 +34,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
   const [to, setTo] = useState('');
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
+  const [remindingAll, setRemindingAll] = useState(false);
 
   const load = async (range?: { from?: string; to?: string }) => {
     setLoading(true);
@@ -72,11 +74,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
   const remind = async (id: number) => {
     setSendingId(id);
     try {
-      toast('success', (await api.sendInvoice(id)).message);
+      toast('success', (await api.remindInvoice(id)).message);
     } catch (err: any) {
       toast('error', err.message);
     } finally {
       setSendingId(null);
+    }
+  };
+
+  const remindAll = async () => {
+    setRemindingAll(true);
+    try {
+      toast('success', (await api.remindOverdue()).message);
+    } catch (err: any) {
+      toast('error', err.message);
+    } finally {
+      setRemindingAll(false);
     }
   };
 
@@ -174,11 +187,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
         </div>
       </div>
 
+      <Card className="mb-5" title="Invoiced vs collected" description="Last six months, by invoice issue date and payment date">
+        <TrendChart data={data.trend} />
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <Card
           className="lg:col-span-2"
           title="Overdue invoices"
           description={f.overdueCount > 20 ? `Largest 20 of ${f.overdueCount} shown` : undefined}
+          actions={f.overdueCount > 0 ? (
+            <Button size="sm" loading={remindingAll} onClick={remindAll}>
+              <BellRing className="w-3 h-3" aria-hidden="true" /> Remind all overdue
+            </Button>
+          ) : undefined}
           flush
         >
           {data.overdueInvoices.length === 0 ? (
@@ -210,8 +232,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateToInvoice, onNav
                       </td>
                       <td className={table.tdNum + ' font-medium'}>{formatMoney(inv.balance_due)}</td>
                       <td className={table.tdNum}>
-                        <Button size="sm" loading={sendingId === inv.id} onClick={() => remind(inv.id)} aria-label={`Send ${inv.invoice_number} to customer`}>
-                          <Send className="w-3 h-3" aria-hidden="true" /> Send
+                        <Button size="sm" loading={sendingId === inv.id} onClick={() => remind(inv.id)} aria-label={`Send a payment reminder for ${inv.invoice_number}`}>
+                          <BellRing className="w-3 h-3" aria-hidden="true" /> Remind
                         </Button>
                       </td>
                     </tr>

@@ -5,6 +5,7 @@ import { runBillingCycle } from '../services/billingEngine.js';
 import { transitionInvoice, InvoiceStatus } from '../services/stateMachine.js';
 import { buildIntegrityReport } from '../services/integrityService.js';
 import { audit } from '../services/audit.js';
+import { sendInvoiceEmail, sendReminder, remindAllOverdue } from '../services/invoiceMail.js';
 import { handle, notFound } from '../lib/errors.js';
 import { asBody, bool, date, dateRange, globPrefix, idParam, int, oneOf, pageMeta, pagination } from '../lib/validation.js';
 import { todayIso } from '../lib/dates.js';
@@ -129,23 +130,23 @@ billingRouter.patch('/invoices/:id/status', staffOnly, handle((req, res) => {
   res.json({ success: true, message: r.message });
 }));
 
-// Email dispatch: stored in the outbox (the dev mailbox) and audit-logged.
+// Email an invoice to the customer (outbox row + SMTP delivery + audit entry).
 billingRouter.post('/invoices/:id/send', staffOnly, handle((req, res) => {
-  const id = idParam(req.params.id);
-  const inv = queryOne<{ id: number; invoice_number: string; subscription_id: number; email: string; total_amount: number; due_date: string }>(
-    `SELECT i.id, i.invoice_number, i.subscription_id, i.total_amount, i.due_date, u.email
-     FROM invoices i JOIN users u ON u.id = i.customer_id WHERE i.id = ?`,
-    [id]
-  );
-  if (!inv) throw notFound('Invoice not found.');
+  const r = sendInvoiceEmail(idParam(req.params.id), req.user!.id);
+  res.json({ success: true, message: `Invoice ${r.invoiceNumber} sent to ${r.email}` });
+}));
 
-  runTransaction(() => {
-    execute(
-      'INSERT INTO email_outbox (to_email, subject, body, kind, related_id) VALUES (?, ?, ?, ?, ?)',
-      [inv.email, `Invoice ${inv.invoice_number}`, `Invoice ${inv.invoice_number} for ${inv.total_amount.toFixed(2)} is due on ${inv.due_date}.`, 'INVOICE', inv.id]
-    );
-    audit('INVOICE_SENT', `Invoice ${inv.invoice_number} dispatched to ${inv.email}`, req.user!.id,
-      { invoiceId: id, recipient: inv.email }, { invoiceId: id, subscriptionId: inv.subscription_id });
+// Chase payment: every overdue invoice at once, or one invoice.
+billingRouter.post('/invoices/remind-overdue', staffOnly, handle((req, res) => {
+  const r = remindAllOverdue(req.user!.id);
+  res.json({
+    success: true,
+    ...r,
+    message: r.sent === 0 ? 'No new reminders to send.' : `Sent ${r.sent} reminder${r.sent === 1 ? '' : 's'}${r.skipped ? ` (${r.skipped} chased recently, skipped)` : ''}.`
   });
-  res.json({ success: true, message: `Invoice #${inv.invoice_number} successfully sent to ${inv.email}` });
+}));
+
+billingRouter.post('/invoices/:id/remind', staffOnly, handle((req, res) => {
+  const r = sendReminder(idParam(req.params.id), req.user!.id);
+  res.json({ success: true, message: `Reminder for ${r.invoiceNumber} sent to ${r.email}` });
 }));

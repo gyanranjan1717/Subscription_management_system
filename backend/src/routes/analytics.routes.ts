@@ -87,6 +87,28 @@ analyticsRouter.get('/summary', handle((req, res) => {
   );
   const recentEvents = queryAll('SELECT id, event_type, description, user_id, created_at FROM audit_logs ORDER BY id DESC LIMIT 10');
 
+  // Six-month trend, oldest first. Months with no activity are kept as zeros so the chart has no gaps.
+  const months: string[] = [];
+  const [ty, tm] = today.split('-').map(Number);
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(Date.UTC(ty, tm - 1 - i, 1));
+    months.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+  }
+  const firstDay = `${months[0]}-01`;
+  const invoicedByMonth = new Map(queryAll<{ m: string; cents: number }>(
+    `SELECT substr(issue_date, 1, 7) AS m, SUM(${CENTS('total_amount')}) AS cents FROM invoices
+     WHERE status IN ('Confirmed', 'Paid') AND issue_date >= ? GROUP BY m`, [firstDay]
+  ).map(r => [r.m, r.cents]));
+  const collectedByMonth = new Map(queryAll<{ m: string; cents: number }>(
+    `SELECT substr(payment_date, 1, 7) AS m, SUM(${CENTS('amount')}) AS cents FROM payments
+     WHERE payment_date >= ? GROUP BY m`, [firstDay]
+  ).map(r => [r.m, r.cents]));
+  const trend = months.map(m => ({
+    month: m,
+    invoiced: fromCents(invoicedByMonth.get(m) ?? 0),
+    collected: fromCents(collectedByMonth.get(m) ?? 0)
+  }));
+
   const ms = Number((performance.now() - started).toFixed(2));
   res.json({
     success: true,
@@ -107,6 +129,7 @@ analyticsRouter.get('/summary', handle((req, res) => {
       performance: { queryExecutionTimeMs: ms, slaMet: ms < 2000 }
     },
     planBreakdown,
+    trend,
     overdueInvoices,
     recentEvents
   });

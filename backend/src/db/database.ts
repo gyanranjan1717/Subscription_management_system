@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 /** Bumped whenever schema.sql changes incompatibly. `npm run seed` rebuilds the database. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 let dbInstance: DatabaseSync | null = null;
 

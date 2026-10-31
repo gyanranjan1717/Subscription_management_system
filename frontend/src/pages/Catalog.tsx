@@ -3,7 +3,8 @@ import { api } from '../services/api.js';
 import { Product, Plan, TaxRule, DiscountRule, QuotationTemplate, User } from '../types.js';
 import { Alert, Button, Card, Checkbox, EmptyState, ErrorState, Input, Loading, Modal, PageHeader, Select, Tabs, table, useToast, cx } from '../components/ui.js';
 import { formatDate, formatMoney } from '../lib/format.js';
-import { Plus } from 'lucide-react';
+import { EditDiscountModal, EditPlanModal, EditProductModal, EditTemplateModal } from '../components/CatalogEditors.js';
+import { Pencil, Plus } from 'lucide-react';
 
 interface CatalogProps {
   currentUser: User | null;
@@ -34,6 +35,11 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
   const [dialog, setDialog] = useState<null | TabId>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [editing, setEditing] = useState<
+    | { kind: 'product'; item: Product } | { kind: 'plan'; item: Plan }
+    | { kind: 'discount'; item: DiscountRule } | { kind: 'template'; item: QuotationTemplate } | null
+  >(null);
 
   // product form
   const [pName, setPName] = useState('');
@@ -75,12 +81,12 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
   const [tpDays, setTpDays] = useState('30');
   const [tpLines, setTpLines] = useState<Array<{ product_id: number; variant_id: number | null; quantity: number }>>([]);
 
-  const loadData = async () => {
+  const loadData = async (archived = showArchived) => {
     setLoading(true);
     setLoadError(null);
     try {
       const [prodRes, planRes, taxRes, discRes, tplRes] = await Promise.all([
-        api.getProducts(), api.getPlans(), api.getTaxes(), api.getDiscounts(), api.getQuotationTemplates()
+        api.getProducts(archived), api.getPlans(archived), api.getTaxes(), api.getDiscounts(archived), api.getQuotationTemplates(archived)
       ]);
       setProducts(prodRes.products);
       setPlans(planRes.plans);
@@ -95,8 +101,8 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
   };
 
   useEffect(() => {
-    loadData();
-  }, []);
+    loadData(showArchived);
+  }, [showArchived]);
 
   const open = (which: TabId) => {
     setFormError(null);
@@ -153,6 +159,13 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
       lines: tpLines.map(l => ({ product_id: l.product_id, variant_id: l.variant_id ?? undefined, default_quantity: l.quantity }))
     }), `Template "${tpName}" created.`);
 
+  const editButton = (target: NonNullable<typeof editing>, label: string) =>
+    isAdmin ? (
+      <Button size="sm" onClick={() => setEditing(target)} aria-label={`Edit ${label}`}><Pencil className="w-3 h-3" aria-hidden="true" /> Edit</Button>
+    ) : null;
+  const archivedTag = (isActive: number | undefined) =>
+    isActive === 0 ? <span className="ml-2 inline-flex rounded border border-slate-300 bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600">Archived</span> : null;
+
   const addButton = (which: TabId, label: string) =>
     isAdmin ? <Button variant="primary" onClick={() => open(which)}><Plus className="w-3.5 h-3.5" aria-hidden="true" /> {label}</Button> : undefined;
 
@@ -178,8 +191,14 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
         ]}
       />
 
+      {isAdmin && (tab === 'products' || tab === 'plans' || tab === 'templates' || tab === 'discounts') && (
+        <div className="mt-3">
+          <Checkbox label="Show archived (inactive) items" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+        </div>
+      )}
+
       <div className="mt-4">
-        {loading ? <Loading label="Loading catalog…" /> : loadError ? <ErrorState message={loadError} onRetry={loadData} /> : (
+        {loading ? <Loading label="Loading catalog…" /> : loadError ? <ErrorState message={loadError} onRetry={() => loadData()} /> : (
           <>
             {tab === 'products' && (
               <Card flush>
@@ -193,13 +212,14 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
                           <th className={table.thNum}>Sales price</th>
                           {isAdmin && <th className={table.thNum}>Cost price</th>}
                           <th className={table.th}>Variants: price extra → unit price on a new line</th>
+                          {isAdmin && <th className={table.thNum}><span className="sr-only">Actions</span></th>}
                         </tr>
                       </thead>
                       <tbody className={table.body}>
                         {products.map(p => (
                           <tr key={p.id} className={table.row}>
                             <td className={table.td + ' align-top'}>
-                              <div className="font-medium text-slate-900">{p.name}</div>
+                              <div className="font-medium text-slate-900">{p.name}{archivedTag(p.is_active)}</div>
                               {p.notes && <div className="text-xs text-slate-500 max-w-xs">{p.notes}</div>}
                             </td>
                             <td className={table.td + ' align-top capitalize'}>{p.type}</td>
@@ -219,6 +239,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
                                 </ul>
                               ) : <span className="text-slate-500 text-sm">No variants</span>}
                             </td>
+                            {isAdmin && <td className={table.tdNum + ' align-top'}>{editButton({ kind: 'product', item: p }, p.name)}</td>}
                           </tr>
                         ))}
                       </tbody>
@@ -240,12 +261,13 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
                           <th className={table.thNum}>Min qty</th>
                           <th className={table.th}>Available</th>
                           <th className={table.th}>Lifecycle rules</th>
+                          {isAdmin && <th className={table.thNum}><span className="sr-only">Actions</span></th>}
                         </tr>
                       </thead>
                       <tbody className={table.body}>
                         {plans.map(p => (
                           <tr key={p.id} className={table.row}>
-                            <td className={table.td + ' font-medium'}>{p.name}</td>
+                            <td className={table.td + ' font-medium'}>{p.name}{archivedTag(p.is_active)}</td>
                             <td className={table.td + ' capitalize'}>{p.billing_interval}</td>
                             <td className={table.tdNum}>{p.min_quantity}</td>
                             <td className={table.td + ' whitespace-nowrap text-slate-600'}>{p.start_date || p.end_date ? `${formatDate(p.start_date)} to ${formatDate(p.end_date)}` : 'Always'}</td>
@@ -257,6 +279,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
                                 <Chip on={!!p.can_renew} label="Renew" />
                               </div>
                             </td>
+                            {isAdmin && <td className={table.tdNum}>{editButton({ kind: 'plan', item: p }, p.name)}</td>}
                           </tr>
                         ))}
                       </tbody>
@@ -270,7 +293,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
               templates.length === 0 ? <Card><EmptyState title="No quotation templates yet" hint={isAdmin ? 'A template bundles a plan and product lines so a quotation can start from it.' : undefined} /></Card> : (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   {templates.map(t => (
-                    <Card key={t.id} title={t.name} description={`Plan: ${t.plan_name} (${t.billing_interval}) · quotation valid ${t.validity_days} days`} flush>
+                    <Card key={t.id} title={t.is_active === 0 ? `${t.name} (archived)` : t.name} description={`Plan: ${t.plan_name} (${t.billing_interval}) · quotation valid ${t.validity_days} days`} actions={editButton({ kind: 'template', item: t }, t.name)} flush>
                       <table className={table.table}>
                         <tbody className={table.body}>
                           {t.lines.map(l => (
@@ -321,13 +344,14 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
                           <th className={table.th}>Conditions</th>
                           <th className={table.th}>Valid</th>
                           <th className={table.thNum}>Used</th>
+                          {isAdmin && <th className={table.thNum}><span className="sr-only">Actions</span></th>}
                         </tr>
                       </thead>
                       <tbody className={table.body}>
                         {discounts.map(d => (
                           <tr key={d.id} className={table.row}>
                             <td className={table.td}>
-                              <div className="font-medium">{d.code}</div>
+                              <div className="font-medium">{d.code}{archivedTag(d.is_active)}</div>
                               <div className="text-xs text-slate-500">{d.description}</div>
                             </td>
                             <td className={table.td + ' whitespace-nowrap'}>{d.discount_type === 'percentage' ? `${d.value}%` : formatMoney(d.value)}</td>
@@ -337,6 +361,7 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
                             </td>
                             <td className={table.td + ' whitespace-nowrap text-slate-600'}>{d.start_date || d.end_date ? `${formatDate(d.start_date)} to ${formatDate(d.end_date)}` : 'Always'}</td>
                             <td className={table.tdNum}>{d.current_uses}{d.max_uses > 0 ? ` / ${d.max_uses}` : ''}</td>
+                            {isAdmin && <td className={table.tdNum}>{editButton({ kind: 'discount', item: d }, d.code)}</td>}
                           </tr>
                         ))}
                       </tbody>
@@ -348,6 +373,15 @@ export const Catalog: React.FC<CatalogProps> = ({ currentUser }) => {
           </>
         )}
       </div>
+
+      {editing && (() => {
+        const done = (message: string) => { setEditing(null); toast('success', message); loadData(); };
+        const close = () => setEditing(null);
+        if (editing.kind === 'product') return <EditProductModal item={editing.item} onClose={close} onSaved={done} />;
+        if (editing.kind === 'plan') return <EditPlanModal item={editing.item} onClose={close} onSaved={done} />;
+        if (editing.kind === 'discount') return <EditDiscountModal item={editing.item} onClose={close} onSaved={done} />;
+        return <EditTemplateModal item={editing.item} onClose={close} onSaved={done} />;
+      })()}
 
       {/* New product */}
       {dialog === 'products' && (

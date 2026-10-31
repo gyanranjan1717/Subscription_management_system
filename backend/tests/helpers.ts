@@ -12,6 +12,7 @@ let baseUrl = '';
 const server = app.listen(0);
 baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 export const closeServer = () => server.close();
+export const apiUrl = () => baseUrl;
 
 export async function api(method: string, path: string, token?: string | null, body?: unknown) {
   const res = await fetch(`${baseUrl}/api${path}`, {

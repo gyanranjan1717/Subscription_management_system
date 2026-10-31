@@ -89,6 +89,7 @@ export interface QuotationTemplate {
   plan_price: number;
   validity_days: number;
   notes?: string;
+  is_active?: number;
   lines: QuotationTemplateLine[];
 }
 
@@ -236,4 +237,22 @@ export interface TimelineEvent {
   amount?: number;
   from?: string;
   to?: string;
+}
+
+export interface TrendPoint {
+  month: string; // YYYY-MM
+  invoiced: number;
+  collected: number;
+}
+
+export interface RazorpayOrder {
+  orderId: string;
+  keyId: string;
+  invoiceId: number;
+  invoiceNumber: string;
+  amountPaise: number;
+  amountInr: number;
+  balanceInr: number;
+  currency: 'INR';
+  prefill: { name: string; email: string };
 }

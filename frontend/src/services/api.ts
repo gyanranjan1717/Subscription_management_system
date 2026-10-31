@@ -1,6 +1,6 @@
 import {
   User, Product, Plan, TaxRule, DiscountRule, QuotationTemplate,
-  Subscription, Invoice, Payment, DashboardMetrics, TimelineEvent
+  Subscription, Invoice, Payment, DashboardMetrics, TimelineEvent, TrendPoint, RazorpayOrder
 } from '../types.js';
 
 import type { PageInfo } from '../components/Pager.js';
@@ -118,16 +118,16 @@ export const api = {
   },
 
   // Catalog
-  async getProducts(): Promise<{ products: Product[] }> {
-    return request('/catalog/products');
+  async getProducts(includeInactive = false): Promise<{ products: Product[] }> {
+    return request(`/catalog/products${includeInactive ? '?include_inactive=true' : ''}`);
   },
 
   async createProduct(body: any): Promise<any> {
     return request('/catalog/products', { method: 'POST', body: JSON.stringify(body) });
   },
 
-  async getPlans(): Promise<{ plans: Plan[] }> {
-    return request('/catalog/plans');
+  async getPlans(includeInactive = false): Promise<{ plans: Plan[] }> {
+    return request(`/catalog/plans${includeInactive ? '?include_inactive=true' : ''}`);
   },
 
   async createPlan(body: any): Promise<any> {
@@ -142,16 +142,33 @@ export const api = {
     return request('/catalog/taxes', { method: 'POST', body: JSON.stringify(body) });
   },
 
-  async getDiscounts(): Promise<{ discounts: DiscountRule[] }> {
-    return request('/catalog/discounts');
+  async getDiscounts(includeInactive = false): Promise<{ discounts: DiscountRule[] }> {
+    return request(`/catalog/discounts${includeInactive ? '?include_inactive=true' : ''}`);
   },
 
   async createDiscount(body: any): Promise<any> {
     return request('/catalog/discounts', { method: 'POST', body: JSON.stringify(body) });
   },
 
-  async getQuotationTemplates(): Promise<{ templates: QuotationTemplate[] }> {
-    return request('/catalog/quotation-templates');
+  async getQuotationTemplates(includeInactive = false): Promise<{ templates: QuotationTemplate[] }> {
+    return request(`/catalog/quotation-templates${includeInactive ? '?include_inactive=true' : ''}`);
+  },
+
+  // Catalog edits (admin). Past subscriptions and invoices keep their original prices.
+  async updateProduct(id: number, body: Record<string, unknown>): Promise<{ message: string }> {
+    return request(`/catalog/products/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  },
+  async updateVariant(id: number, body: Record<string, unknown>): Promise<{ message: string }> {
+    return request(`/catalog/variants/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  },
+  async updatePlan(id: number, body: Record<string, unknown>): Promise<{ message: string }> {
+    return request(`/catalog/plans/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  },
+  async updateDiscount(id: number, body: Record<string, unknown>): Promise<{ message: string }> {
+    return request(`/catalog/discounts/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  },
+  async updateQuotationTemplate(id: number, body: Record<string, unknown>): Promise<{ message: string }> {
+    return request(`/catalog/quotation-templates/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
   },
 
   async createQuotationTemplate(body: any): Promise<any> {
@@ -241,29 +258,29 @@ export const api = {
     return request('/payments', { method: 'POST', body: JSON.stringify(body) });
   },
 
-  async createRazorpayOrder(invoiceId: number): Promise<{
-    orderId: string;
-    invoiceId: number;
-    invoiceNumber: string;
-    amountPaise: number;
-    amountInr: number;
-    currency: string;
-    keyId: string;
-  }> {
-    return request('/payments/razorpay/create-order', { method: 'POST', body: JSON.stringify({ invoice_id: invoiceId }) });
+  async getRazorpayConfig(): Promise<{ enabled: boolean; mode: 'test' | 'live' | null }> {
+    return request('/payments/razorpay/config');
   },
 
-  async verifyRazorpayPayment(body: {
-    invoice_id: number;
-    razorpay_order_id: string;
-    razorpay_payment_id: string;
-    razorpay_signature?: string;
-  }): Promise<any> {
+  /** Amount is optional: omit it to pay the whole balance, or pass a smaller number for a part-payment. */
+  async createRazorpayOrder(invoiceId: number, amount?: string): Promise<RazorpayOrder> {
+    return request('/payments/razorpay/create-order', { method: 'POST', body: JSON.stringify({ invoice_id: invoiceId, ...(amount ? { amount } : {}) }) });
+  },
+
+  async verifyRazorpayPayment(body: { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }): Promise<{ message: string; payment: { invoiceNumber: string; status: string; balanceRemaining: number } }> {
     return request('/payments/razorpay/verify-payment', { method: 'POST', body: JSON.stringify(body) });
   },
 
+  async remindInvoice(id: number): Promise<{ message: string }> {
+    return request(`/billing/invoices/${id}/remind`, { method: 'POST' });
+  },
+
+  async remindOverdue(): Promise<{ message: string; sent: number; skipped: number }> {
+    return request('/billing/invoices/remind-overdue', { method: 'POST' });
+  },
+
   // Analytics
-  async getSummary(range?: { from?: string; to?: string }): Promise<{ metrics: DashboardMetrics; planBreakdown: any[]; overdueInvoices: any[]; recentEvents: any[] }> {
+  async getSummary(range?: { from?: string; to?: string }): Promise<{ metrics: DashboardMetrics; planBreakdown: any[]; trend: TrendPoint[]; overdueInvoices: any[]; recentEvents: any[] }> {
     const qs = new URLSearchParams();
     if (range?.from) qs.append('from', range.from);
     if (range?.to) qs.append('to', range.to);

@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     body TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('RESET', 'INVOICE', 'REMINDER', 'OTP')),
     related_id INTEGER,
+    -- queued: not yet handed to SMTP; sent: accepted by the SMTP server; simulated: SMTP not configured; failed: SMTP error
+    delivery_status TEXT NOT NULL DEFAULT 'queued' CHECK(delivery_status IN ('queued', 'sent', 'simulated', 'failed')),
+    delivery_error TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -48,8 +51,9 @@ CREATE TABLE IF NOT EXISTS email_outbox (
 CREATE TABLE IF NOT EXISTS email_otps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL,
-    otp_code TEXT NOT NULL,
+    otp_code TEXT NOT NULL, -- SHA-256 of the code, never the code itself
     expires_at DATETIME NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
     used INTEGER NOT NULL DEFAULT 0 CHECK(used IN (0, 1)),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -313,3 +317,21 @@ CREATE INDEX IF NOT EXISTS idx_invoice_discounts_rule ON invoice_discounts(disco
 CREATE INDEX IF NOT EXISTS idx_audit_event ON audit_logs(event_type, id);
 CREATE INDEX IF NOT EXISTS idx_audit_subscription ON audit_logs(subscription_id) WHERE subscription_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_audit_invoice ON audit_logs(invoice_id) WHERE invoice_id IS NOT NULL;
+
+-- Online payment orders (Razorpay). The amount is fixed server-side when the order is created and is
+-- the only amount ever credited; the client never tells us how much was paid.
+CREATE TABLE IF NOT EXISTS payment_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gateway TEXT NOT NULL DEFAULT 'razorpay',
+    gateway_order_id TEXT NOT NULL UNIQUE,
+    gateway_payment_id TEXT UNIQUE,
+    invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
+    created_by INTEGER REFERENCES users(id),
+    amount REAL NOT NULL CHECK(amount > 0),
+    currency TEXT NOT NULL DEFAULT 'INR',
+    status TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created', 'paid', 'failed')),
+    payment_id INTEGER REFERENCES payments(id),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    paid_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_invoice ON payment_orders(invoice_id, status);

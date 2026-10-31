@@ -221,9 +221,11 @@ test('invoices: sending an invoice writes the email to the outbox and the audit 
   runBillingCycle('2066-01-01');
   const inv = queryOne<any>('SELECT id, invoice_number FROM invoices WHERE subscription_id = ?', [s])!;
   assert.equal((await api('POST', `/billing/invoices/${inv.id}/send`, f.b, {})).status, 403);
+  assert.equal((await api('POST', `/billing/invoices/${inv.id}/send`, f.staff, {})).status, 409, 'a Draft invoice is not sent to the customer');
+  await api('PATCH', `/billing/invoices/${inv.id}/status`, f.staff, { status: 'Confirmed' });
   const sent = await api('POST', `/billing/invoices/${inv.id}/send`, f.staff, {});
   assert.equal(sent.status, 200);
   const mail = queryOne<any>("SELECT to_email, subject FROM email_outbox WHERE kind = 'INVOICE' ORDER BY id DESC")!;
-  assert.deepEqual([mail.to_email, mail.subject], ['b@test.com', `Invoice ${inv.invoice_number}`]);
+  assert.deepEqual([mail.to_email, mail.subject], ['b@test.com', `Invoice ${inv.invoice_number} from Brightloop`]);
   assert.equal(queryAll<any>("SELECT id FROM audit_logs WHERE event_type = 'INVOICE_SENT' AND invoice_id = ?", [inv.id]).length, 1);
 });
