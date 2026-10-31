@@ -38,12 +38,23 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     to_email TEXT NOT NULL,
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('RESET', 'INVOICE', 'REMINDER')),
+    kind TEXT NOT NULL CHECK(kind IN ('RESET', 'INVOICE', 'REMINDER', 'OTP')),
     related_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Gap-free named counters (invoice numbers, subscription numbers)
+-- Registration and verification one-time passwords (OTP)
+CREATE TABLE IF NOT EXISTS email_otps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    otp_code TEXT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0 CHECK(used IN (0, 1)),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_email_otps_lookup ON email_otps(lower(email), otp_code, used);
+
 CREATE TABLE IF NOT EXISTS sequences (
     name TEXT PRIMARY KEY,
     value INTEGER NOT NULL

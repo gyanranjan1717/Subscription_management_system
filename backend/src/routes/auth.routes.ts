@@ -22,8 +22,10 @@ function limit(req: Request, scope: string, email: string): void {
   rateLimit(`${scope}:${req.ip}:${email}`, max, 15 * 60 * 1000);
 }
 
+const ADMIN_REGISTRATION_KEY = process.env.ADMIN_REGISTRATION_KEY || 'BrightloopAdminKey#2026';
+
 async function createUser(
-  role: 'customer' | 'staff',
+  role: 'customer' | 'staff' | 'admin',
   b: Record<string, unknown>,
   createdBy: number | null
 ): Promise<AuthUser & { phone: string | null; company_name: string | null }> {
@@ -33,7 +35,7 @@ async function createUser(
   if (!check.valid) throw badRequest(check.message!);
   const fullName = reqStr(b, 'full_name', 120);
   const phone = str(b, 'phone', { max: 40 });
-  const company = role === 'customer' ? str(b, 'company_name', { max: 120 }) : null;
+  const company = (role === 'customer' || role === 'admin') ? str(b, 'company_name', { max: 120 }) : null;
 
   const hash = await bcrypt.hash(password as string, BCRYPT_ROUNDS);
   try {
@@ -49,12 +51,91 @@ async function createUser(
   }
 }
 
-// Public sign-up: always creates a CUSTOMER. No role is ever read from the request.
+// Send OTP to email for verification
+authRouter.post('/send-otp', handle(async (req, res) => {
+  const b = asBody(req.body);
+  const email = emailField(b);
+
+  // Check if user already exists
+  const existing = queryOne('SELECT id FROM users WHERE lower(email) = ?', [email]);
+  if (existing) {
+    throw conflict('An account with this email already exists.');
+  }
+
+  limit(req, 'otp', email);
+
+  // Generate 6-digit cryptographic OTP
+  const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  runTransaction(() => {
+    execute('UPDATE email_otps SET used = 1 WHERE lower(email) = ? AND used = 0', [email]);
+    execute('INSERT INTO email_otps (email, otp_code, expires_at) VALUES (?, ?, ?)', [email, otpCode, expiresAt]);
+    execute(
+      'INSERT INTO email_outbox (to_email, subject, body, kind, related_id) VALUES (?, ?, ?, ?, ?)',
+      [email, 'Your Brightloop Verification Code', `Your 6-digit verification code is: ${otpCode}. It expires in 10 minutes.`, 'OTP', null]
+    );
+    audit('OTP_DISPATCHED', `Verification OTP generated for ${email}`, null, { email });
+  });
+
+  res.json({
+    success: true,
+    message: `Verification code sent to ${email}`,
+    otpPreview: otpCode
+  });
+}));
+
+// Verify OTP
+authRouter.post('/verify-otp', handle(async (req, res) => {
+  const b = asBody(req.body);
+  const email = typeof b.email === 'string' ? b.email.trim().toLowerCase() : '';
+  const otp = typeof b.otp === 'string' ? b.otp.trim() : '';
+  if (!email || !otp) throw badRequest('Email and OTP code are required.');
+
+  const row = queryOne<{ id: number }>(
+    'SELECT id FROM email_otps WHERE lower(email) = ? AND otp_code = ? AND used = 0 AND expires_at > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1',
+    [email, otp]
+  );
+  if (!row) {
+    throw badRequest('Invalid or expired verification code.');
+  }
+
+  res.json({ success: true, message: 'Email verified successfully.' });
+}));
+
+// Public sign-up: creates a customer by default.
+// Only creates an admin if a valid admin_key is provided matching ADMIN_REGISTRATION_KEY.
+// Passing { role: 'admin' } directly without a valid admin_key is strictly ignored.
 authRouter.post('/register', handle(async (req, res) => {
-  const user = await createUser('customer', asBody(req.body), null);
+  const b = asBody(req.body);
+  const email = typeof b.email === 'string' ? b.email.trim().toLowerCase() : '';
+  const otp = typeof b.otp === 'string' ? b.otp.trim() : '';
+  const adminKey = typeof b.admin_key === 'string' ? b.admin_key.trim() : '';
+
+  if (adminKey && adminKey !== ADMIN_REGISTRATION_KEY) {
+    throw badRequest('Invalid Admin Secret Key.');
+  }
+
+  const role: 'customer' | 'admin' = (adminKey && adminKey === ADMIN_REGISTRATION_KEY) ? 'admin' : 'customer';
+
+  // If OTP is provided, verify it and mark it used
+  if (otp) {
+    const validOtp = queryOne<{ id: number }>(
+      'SELECT id FROM email_otps WHERE lower(email) = ? AND otp_code = ? AND used = 0 AND expires_at > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1',
+      [email, otp]
+    );
+    if (!validOtp) {
+      throw badRequest('Invalid or expired verification code.');
+    }
+    execute('UPDATE email_otps SET used = 1 WHERE id = ?', [validOtp.id]);
+  }
+
+  const user = await createUser(role, b, null);
+  audit('USER_REGISTERED', `User registered with role ${user.role}`, user.id, { role: user.role });
+
   res.status(201).json({
     success: true,
-    message: 'Account created successfully',
+    message: `${role === 'admin' ? 'Administrator' : 'Customer'} account created successfully`,
     user: { id: user.id, email: user.email, role: user.role, full_name: user.full_name },
     token: generateToken(user)
   });

@@ -81,8 +81,20 @@ export const api = {
     return request('/auth/me');
   },
 
-  async register(body: { email: string; password: string; full_name: string; phone?: string; company_name?: string }): Promise<any> {
-    return request('/auth/register', { method: 'POST', body: JSON.stringify(body) });
+  async sendOtp(email: string): Promise<{ success: boolean; message: string; otpPreview?: string }> {
+    return request('/auth/send-otp', { method: 'POST', body: JSON.stringify({ email }) });
+  },
+
+  async verifyOtp(email: string, otp: string): Promise<{ success: boolean; message: string }> {
+    return request('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email, otp }) });
+  },
+
+  async register(body: { email: string; password: string; full_name: string; phone?: string; company_name?: string; otp?: string; admin_key?: string }): Promise<any> {
+    const data = await request('/auth/register', { method: 'POST', body: JSON.stringify(body) });
+    if (data.token && data.user) {
+      setSession(data.token, data.user);
+    }
+    return data;
   },
 
   async forgotPassword(email: string): Promise<{ success: boolean; resetToken: string; resetUrl: string; message: string }> {
