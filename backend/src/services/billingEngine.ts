@@ -59,6 +59,35 @@ interface DueSubscription {
   billing_interval: BillingInterval;
 }
 
+interface LineRow {
+  subscription_id: number; product_id: number; variant_id: number | null; quantity: number; unit_price: number;
+  tax_id: number | null; product_name: string; attribute_name: string | null; option_name: string | null;
+}
+
+/** One query per chunk of subscriptions instead of one per subscription (no N+1 on billing day). */
+function loadLines(subscriptionIds: number[]): Map<number, LineRow[]> {
+  const out = new Map<number, LineRow[]>();
+  const CHUNK = 500;
+  for (let i = 0; i < subscriptionIds.length; i += CHUNK) {
+    const ids = subscriptionIds.slice(i, i + CHUNK);
+    const rows = queryAll<LineRow>(
+      `SELECT sl.subscription_id, sl.product_id, sl.variant_id, sl.quantity, sl.unit_price, sl.tax_id,
+              p.name AS product_name, pv.attribute_name, pv.option_name
+       FROM subscription_lines sl
+       JOIN products p ON p.id = sl.product_id
+       LEFT JOIN product_variants pv ON pv.id = sl.variant_id
+       WHERE sl.subscription_id IN (${ids.map(() => '?').join(',')})
+       ORDER BY sl.subscription_id, sl.id`,
+      ids
+    );
+    for (const r of rows) {
+      const list = out.get(r.subscription_id);
+      if (list) list.push(r); else out.set(r.subscription_id, [r]);
+    }
+  }
+  return out;
+}
+
 interface CursorRow {
   status: string;
   next_period_index: number;
@@ -115,13 +144,14 @@ export function runBillingCycle(
       [asOfDate]
     );
     result.processedCount = due.length;
+    const lines = loadLines(due.map(d => d.id));
 
     for (const sub of due) {
       // Counters are collected per subscription and merged only after its transaction commits,
       // so a rolled-back subscription never leaks into the run totals.
       const local: BillingRunResult = { ...result, invoicesCreated: 0, skippedDuplicates: 0, invoiceIds: [], details: [] };
       try {
-        const cents = runTransaction(() => billSubscription(sub, asOfDate, taxes, opts, local));
+        const cents = runTransaction(() => billSubscription(sub, lines, asOfDate, taxes, opts, local));
         totalCents += cents;
         result.invoicesCreated += local.invoicesCreated;
         result.skippedDuplicates += local.skippedDuplicates;
@@ -168,6 +198,7 @@ export function runBillingCycle(
 /** Bills all due periods of one subscription. Must run inside a transaction. Returns billed cents. */
 function billSubscription(
   sub: DueSubscription,
+  lines: Map<number, LineRow[]>,
   asOfDate: string,
   taxes: TaxTable,
   opts: BillingRunOptions,
@@ -177,18 +208,7 @@ function billSubscription(
   const cursor = queryOne<CursorRow>('SELECT status, next_period_index FROM subscriptions WHERE id = ?', [sub.id]);
   if (!cursor || cursor.status !== 'Active') return 0;
 
-  const lineRows = queryAll<{
-    product_id: number; variant_id: number | null; quantity: number; unit_price: number; tax_id: number | null;
-    product_name: string; attribute_name: string | null; option_name: string | null;
-  }>(
-    `SELECT sl.product_id, sl.variant_id, sl.quantity, sl.unit_price, sl.tax_id, p.name AS product_name,
-            pv.attribute_name, pv.option_name
-     FROM subscription_lines sl
-     JOIN products p ON p.id = sl.product_id
-     LEFT JOIN product_variants pv ON pv.id = sl.variant_id
-     WHERE sl.subscription_id = ? ORDER BY sl.id`,
-    [sub.id]
-  );
+  const lineRows = lines.get(sub.id) ?? [];
   if (lineRows.length === 0) throw new Error('Subscription has no lines to bill');
 
   const termDays = paymentTermDays(sub.payment_terms);

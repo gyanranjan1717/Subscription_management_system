@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api.js';
+import Pager, { PageInfo } from '../components/Pager.js';
 import { Invoice } from '../types.js';
 import {
   CreditCard, Printer, Send, DollarSign, CheckCircle2,
@@ -14,6 +15,8 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('All');
+  const [page, setPage] = useState(1);
+  const [pageInfo, setPageInfo] = useState<PageInfo | null>(null);
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
@@ -36,9 +39,11 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
     try {
       const res = await api.getInvoices({
         status: statusFilter,
-        overdue: overdueOnly
+        overdue: overdueOnly,
+        page
       });
       setInvoices(res.invoices);
+      setPageInfo(res.pagination);
       if (initialInvoiceId) {
         viewInvoice(initialInvoiceId);
       }
@@ -49,9 +54,19 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
     }
   };
 
+  // One request per change: a new filter goes back to page 1 instead of fetching the stale page first.
+  const filterKey = `${statusFilter}|${overdueOnly}`;
+  const lastFilterKey = useRef(filterKey);
   useEffect(() => {
+    if (lastFilterKey.current !== filterKey) {
+      lastFilterKey.current = filterKey;
+      if (page !== 1) {
+        setPage(1);
+        return;
+      }
+    }
     loadInvoices();
-  }, [statusFilter, overdueOnly]);
+  }, [filterKey, page]);
 
   const viewInvoice = async (id: number) => {
     try {
@@ -329,6 +344,7 @@ export const Invoices: React.FC<InvoicesProps> = ({ initialInvoiceId }) => {
             </tbody>
           </table>
         </div>
+        <Pager info={pageInfo} onPage={setPage} />
       </div>
 
       {/* Modal 1: Printable Official Invoice View */}

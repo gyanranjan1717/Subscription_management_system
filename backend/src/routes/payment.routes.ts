@@ -3,7 +3,7 @@ import { queryAll, queryOne } from '../db/database.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 import { recordPayment, PAYMENT_METHODS } from '../services/paymentService.js';
 import { handle } from '../lib/errors.js';
-import { asBody, date, int, money, oneOf, pagination, str } from '../lib/validation.js';
+import { asBody, date, dateRange, int, money, oneOf, pageMeta, pagination, str } from '../lib/validation.js';
 import { todayIso } from '../lib/dates.js';
 
 export const paymentRouter = Router();
@@ -35,18 +35,21 @@ paymentRouter.get('/', handle((req, res) => {
     where.push('p.invoice_id = ?');
     params.push(int({ v: req.query.invoice_id }, 'v', { min: 1 }));
   }
-  const clause = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-  const select = `
-    SELECT p.id, p.invoice_id, p.amount, p.payment_method, p.payment_date, p.reference, p.note, p.created_at,
-           i.invoice_number, i.total_amount AS invoice_total, u.full_name AS customer_name, u.email AS customer_email
-    FROM payments p JOIN invoices i ON i.id = p.invoice_id JOIN users u ON u.id = i.customer_id${clause}
-    ORDER BY p.id DESC`;
+  if (req.query.method) { where.push('p.payment_method = ?'); params.push(oneOf({ m: req.query.method }, 'm', PAYMENT_METHODS)); }
+  const { from, to } = dateRange(req.query);
+  if (from) { where.push('p.payment_date >= ?'); params.push(from); }
+  if (to) { where.push('p.payment_date <= ?'); params.push(to); }
 
-  if (req.query.page !== undefined || req.query.page_size !== undefined) {
-    const { page, pageSize, offset } = pagination(req.query);
-    const total = queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM payments p JOIN invoices i ON i.id = p.invoice_id${clause}`, params)!.n;
-    res.json({ success: true, payments: queryAll(`${select} LIMIT ? OFFSET ?`, [...params, pageSize, offset]), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } });
-    return;
-  }
-  res.json({ success: true, payments: queryAll(select, params) });
+  const clause = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+  const { page, pageSize, offset } = pagination(req.query);
+  const joins = 'JOIN invoices i ON i.id = p.invoice_id';
+  const total = queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM payments p ${joins}${clause}`, params)!.n;
+  const payments = queryAll(
+    `SELECT p.id, p.invoice_id, p.amount, p.payment_method, p.payment_date, p.reference, p.note, p.created_at,
+            i.invoice_number, i.total_amount AS invoice_total, u.full_name AS customer_name, u.email AS customer_email
+     FROM payments p JOIN invoices i ON i.id = p.invoice_id JOIN users u ON u.id = i.customer_id${clause}
+     ORDER BY p.id DESC LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  res.json({ success: true, payments, pagination: pageMeta(page, pageSize, total) });
 }));

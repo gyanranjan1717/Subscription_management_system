@@ -5,7 +5,7 @@ import { transitionSubscription, SubscriptionStatus } from '../services/stateMac
 import { createSubscription, loadTemplate, renewSubscription } from '../services/subscriptionService.js';
 import { buildSubscriptionTimeline } from '../services/timelineService.js';
 import { handle, notFound, forbidden, badRequest } from '../lib/errors.js';
-import { asBody, date, idParam, int, oneOf, pagination, str } from '../lib/validation.js';
+import { asBody, date, globPrefix, idParam, int, oneOf, pageMeta, pagination, str } from '../lib/validation.js';
 import { todayIso } from '../lib/dates.js';
 
 export const subscriptionRouter = Router();
@@ -48,19 +48,14 @@ subscriptionRouter.get('/', handle((req, res) => {
   }
   if (req.query.status) { where.push('s.status = ?'); params.push(oneOf({ status: req.query.status }, 'status', STATUSES)); }
 
+  const q = globPrefix(req.query.q);
+  if (q) { where.push('s.subscription_number GLOB ?'); params.push(q); }
+
   const clause = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-  const paged = req.query.page !== undefined || req.query.page_size !== undefined;
-  let sql = `${SUB_SELECT}${clause} ORDER BY s.id DESC`;
-  const extra: Record<string, unknown> = {};
-  if (paged) {
-    const { page, pageSize, offset } = pagination(req.query);
-    sql += ' LIMIT ? OFFSET ?';
-    const total = queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM subscriptions s${clause}`, params)!.n;
-    extra.pagination = { page, pageSize, total, totalPages: Math.ceil(total / pageSize) };
-    res.json({ success: true, subscriptions: queryAll(sql, [...params, pageSize, offset]), ...extra });
-    return;
-  }
-  res.json({ success: true, subscriptions: queryAll(sql, params) });
+  const { page, pageSize, offset } = pagination(req.query);
+  const total = queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM subscriptions s${clause}`, params)!.n;
+  const subscriptions = queryAll(`${SUB_SELECT}${clause} ORDER BY s.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+  res.json({ success: true, subscriptions, pagination: pageMeta(page, pageSize, total) });
 }));
 
 subscriptionRouter.get('/:id', handle((req, res) => {

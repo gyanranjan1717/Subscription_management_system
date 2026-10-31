@@ -8,7 +8,14 @@
     "dev": "node run-dev.js",
     "seed": "npm --prefix backend run seed",
     "test": "npm --prefix backend test",
-    "build": "npm --prefix backend run build && npm --prefix frontend run build"
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "benchmark": "npm --prefix backend run benchmark"
   },
-  "keywords": ["odoo", "hackathon", "subscriptions", "billing-engine", "invoicing"]
+  "keywords": [
+    "odoo",
+    "hackathon",
+    "subscriptions",
+    "billing-engine",
+    "invoicing"
+  ]
 }

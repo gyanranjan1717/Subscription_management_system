@@ -103,7 +103,11 @@ export function idParam(raw: unknown): number {
   return n;
 }
 
-export function pagination(query: Record<string, unknown>, defaultSize = 50, maxSize = 200): { page: number; pageSize: number; offset: number } {
+export const DEFAULT_PAGE_SIZE = 100;
+export const MAX_PAGE_SIZE = 200;
+
+/** Every list endpoint is paginated: page 1 of 100 rows unless the caller asks otherwise (max 200). */
+export function pagination(query: Record<string, unknown>, defaultSize = DEFAULT_PAGE_SIZE, maxSize = MAX_PAGE_SIZE): { page: number; pageSize: number; offset: number } {
   const page = Math.max(1, Number.parseInt(String(query.page ?? '1'), 10) || 1);
   const size = Number.parseInt(String(query.page_size ?? defaultSize), 10) || defaultSize;
   const pageSize = Math.min(maxSize, Math.max(1, size));
@@ -122,4 +126,24 @@ export function csvField(v: unknown): string {
   let s = v === null || v === undefined ? '' : String(v);
   if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
+}
+
+/** Index-friendly prefix search pattern for GLOB (wildcards in user input are removed). */
+export function globPrefix(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim().replace(/[*?\[\]]/g, '').slice(0, 40);
+  return t ? `${t}*` : null;
+}
+
+export function pageMeta(page: number, pageSize: number, total: number) {
+  return { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+}
+
+/** Optional ?from=&to= (YYYY-MM-DD) filter values. */
+export function dateRange(query: Record<string, unknown>): { from: string | null; to: string | null } {
+  const from = query.from === undefined || query.from === '' ? null : String(query.from);
+  const to = query.to === undefined || query.to === '' ? null : String(query.to);
+  for (const v of [from, to]) if (v !== null && !isIsoDate(v)) throw badRequest('from / to must be valid dates in YYYY-MM-DD format.');
+  if (from && to && to < from) throw badRequest('to cannot be before from.');
+  return { from, to };
 }

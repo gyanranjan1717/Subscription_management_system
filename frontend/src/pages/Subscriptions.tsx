@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api.js';
+import Pager, { PageInfo } from '../components/Pager.js';
 import { Subscription, Plan, Product, QuotationTemplate, DiscountRule } from '../types.js';
 import {
   FileText, Plus, Filter, CheckCircle, ArrowRight, PauseCircle,
@@ -10,6 +11,8 @@ export const Subscriptions: React.FC = () => {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [selectedSub, setSelectedSub] = useState<Subscription | null>(null);
   const [statusFilter, setStatusFilter] = useState('All');
+  const [page, setPage] = useState(1);
+  const [pageInfo, setPageInfo] = useState<PageInfo | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -30,8 +33,9 @@ export const Subscriptions: React.FC = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const res = await api.getSubscriptions({ status: statusFilter });
+      const res = await api.getSubscriptions({ status: statusFilter, page });
       setSubscriptions(res.subscriptions);
+      setPageInfo(res.pagination);
     } catch (err: any) {
       alert('Error loading subscriptions: ' + err.message);
     } finally {
@@ -56,9 +60,18 @@ export const Subscriptions: React.FC = () => {
     }
   };
 
+  // One request per change: a new filter goes back to page 1 instead of fetching the stale page first.
+  const lastStatusFilter = useRef(statusFilter);
   useEffect(() => {
+    if (lastStatusFilter.current !== statusFilter) {
+      lastStatusFilter.current = statusFilter;
+      if (page !== 1) {
+        setPage(1);
+        return;
+      }
+    }
     loadData();
-  }, [statusFilter]);
+  }, [statusFilter, page]);
 
   const openCreateModal = () => {
     loadCatalogForModal();
@@ -312,6 +325,7 @@ export const Subscriptions: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pager info={pageInfo} onPage={setPage} />
         </div>
 
         {/* Detail Panel */}

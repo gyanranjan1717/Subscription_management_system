@@ -6,7 +6,7 @@ import { transitionInvoice, InvoiceStatus } from '../services/stateMachine.js';
 import { buildIntegrityReport } from '../services/integrityService.js';
 import { audit } from '../services/audit.js';
 import { handle, notFound } from '../lib/errors.js';
-import { asBody, bool, date, idParam, int, oneOf, pagination } from '../lib/validation.js';
+import { asBody, bool, date, dateRange, globPrefix, idParam, int, oneOf, pageMeta, pagination } from '../lib/validation.js';
 import { todayIso } from '../lib/dates.js';
 
 export const billingRouter = Router();
@@ -90,16 +90,17 @@ billingRouter.get('/invoices', handle((req, res) => {
     params.push(today);
   }
 
+  const q = globPrefix(req.query.q);
+  if (q) { where.push('i.invoice_number GLOB ?'); params.push(q); }
+  const { from, to } = dateRange(req.query);
+  if (from) { where.push('i.issue_date >= ?'); params.push(from); }
+  if (to) { where.push('i.issue_date <= ?'); params.push(to); }
+
   const clause = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-  const order = ' ORDER BY i.id DESC';
-  if (req.query.page !== undefined || req.query.page_size !== undefined) {
-    const { page, pageSize, offset } = pagination(req.query);
-    const total = queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM invoices i${clause}`, params)!.n;
-    const invoices = queryAll(`${INVOICE_SELECT}${clause}${order} LIMIT ? OFFSET ?`, [today, ...params, pageSize, offset]);
-    res.json({ success: true, invoices, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } });
-    return;
-  }
-  res.json({ success: true, invoices: queryAll(`${INVOICE_SELECT}${clause}${order}`, [today, ...params]) });
+  const { page, pageSize, offset } = pagination(req.query);
+  const total = queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM invoices i${clause}`, params)!.n;
+  const invoices = queryAll(`${INVOICE_SELECT}${clause} ORDER BY i.id DESC LIMIT ? OFFSET ?`, [today, ...params, pageSize, offset]);
+  res.json({ success: true, invoices, pagination: pageMeta(page, pageSize, total) });
 }));
 
 billingRouter.get('/invoices/:id', handle((req, res) => {

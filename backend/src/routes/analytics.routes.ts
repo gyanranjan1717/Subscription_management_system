@@ -3,7 +3,7 @@ import { queryAll, queryOne } from '../db/database.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 import { handle } from '../lib/errors.js';
 import { divRoundHalfUp, fromCents } from '../lib/money.js';
-import { csvField } from '../lib/validation.js';
+import { csvField, dateRange } from '../lib/validation.js';
 import { todayIso } from '../lib/dates.js';
 
 export const analyticsRouter = Router();
@@ -22,9 +22,10 @@ function monthlyCents(interval: string, cents: number): number {
   }
 }
 
-analyticsRouter.get('/summary', handle((_req, res) => {
+analyticsRouter.get('/summary', handle((req, res) => {
   const started = performance.now();
   const today = todayIso();
+  const { from, to } = dateRange(req.query);
 
   const subStats = queryOne<Record<string, number>>(
     `SELECT COUNT(*) AS total,
@@ -44,15 +45,32 @@ analyticsRouter.get('/summary', handle((_req, res) => {
   );
   const mrrCents = mrrRows.reduce((sum, r) => sum + monthlyCents(r.billing_interval, r.cents), 0);
 
-  const inv = queryOne<Record<string, number>>(
-    `SELECT COALESCE(SUM(${CENTS('total_amount')}), 0) AS invoiced,
-            COALESCE(SUM(${CENTS('amount_paid')}), 0) AS collected,
-            COALESCE(SUM(${CENTS('total_amount - amount_paid')}), 0) AS owed,
-            COALESCE(SUM(CASE WHEN status = 'Confirmed' AND amount_paid < total_amount AND due_date < ? THEN 1 ELSE 0 END), 0) AS overdue_count,
-            COALESCE(SUM(CASE WHEN status = 'Confirmed' AND amount_paid < total_amount AND due_date < ? THEN ${CENTS('total_amount - amount_paid')} ELSE 0 END), 0) AS overdue_cents
-     FROM invoices WHERE status IN ('Confirmed', 'Paid')`,
+  // Period filter: invoiced = invoices issued in [from, to]; collected = payments dated in [from, to].
+  // Owed and overdue are always "as of today" (they describe the receivables book, not a period).
+  const invWhere: string[] = ["status IN ('Confirmed', 'Paid')"];
+  const invParams: string[] = [];
+  if (from) { invWhere.push('issue_date >= ?'); invParams.push(from); }
+  if (to) { invWhere.push('issue_date <= ?'); invParams.push(to); }
+  const invoiced = queryOne<{ cents: number }>(
+    `SELECT COALESCE(SUM(${CENTS('total_amount')}), 0) AS cents FROM invoices WHERE ${invWhere.join(' AND ')}`, invParams
+  )!;
+
+  const payWhere: string[] = [];
+  const payParams: string[] = [];
+  if (from) { payWhere.push('payment_date >= ?'); payParams.push(from); }
+  if (to) { payWhere.push('payment_date <= ?'); payParams.push(to); }
+  const collected = queryOne<{ cents: number; n: number }>(
+    `SELECT COALESCE(SUM(${CENTS('amount')}), 0) AS cents, COUNT(*) AS n FROM payments${payWhere.length ? ` WHERE ${payWhere.join(' AND ')}` : ''}`, payParams
+  )!;
+
+  const book = queryOne<Record<string, number>>(
+    `SELECT COALESCE(SUM(${CENTS('total_amount - amount_paid')}), 0) AS owed,
+            COALESCE(SUM(CASE WHEN due_date < ? THEN 1 ELSE 0 END), 0) AS overdue_count,
+            COALESCE(SUM(CASE WHEN due_date < ? THEN ${CENTS('total_amount - amount_paid')} ELSE 0 END), 0) AS overdue_cents
+     FROM invoices WHERE status = 'Confirmed' AND amount_paid < total_amount`,
     [today, today]
   )!;
+  const inv = { invoiced: invoiced.cents, collected: collected.cents, owed: book.owed, overdue_count: book.overdue_count, overdue_cents: book.overdue_cents };
 
   const overdueInvoices = queryAll(
     `SELECT i.id, i.invoice_number, i.total_amount, i.amount_paid, ROUND(i.total_amount - i.amount_paid, 2) AS balance_due,
@@ -85,6 +103,7 @@ analyticsRouter.get('/summary', handle((_req, res) => {
         overdueCount: inv.overdue_count,
         overdueAmount: fromCents(inv.overdue_cents)
       },
+      period: { from, to, paymentsCount: collected.n },
       performance: { queryExecutionTimeMs: ms, slaMet: ms < 2000 }
     },
     planBreakdown,

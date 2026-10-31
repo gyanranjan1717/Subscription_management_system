@@ -3,6 +3,8 @@ import {
   Subscription, Invoice, Payment, DashboardMetrics, TimelineEvent
 } from '../types.js';
 
+import type { PageInfo } from '../components/Pager.js';
+
 const API_BASE = '/api';
 
 export const DEMO_USERS = {
@@ -133,8 +135,9 @@ export const api = {
   },
 
   // Subscriptions
-  async getSubscriptions(params?: { status?: string; customer_id?: number }): Promise<{ subscriptions: Subscription[] }> {
+  async getSubscriptions(params?: { status?: string; customer_id?: number; page?: number }): Promise<{ subscriptions: Subscription[]; pagination: PageInfo }> {
     const qs = new URLSearchParams();
+    if (params?.page) qs.append('page', String(params.page));
     if (params?.status && params.status !== 'All') qs.append('status', params.status);
     if (params?.customer_id) qs.append('customer_id', String(params.customer_id));
     const url = `/subscriptions${qs.toString() ? '?' + qs.toString() : ''}`;
@@ -170,8 +173,9 @@ export const api = {
     return request('/billing/history');
   },
 
-  async getInvoices(params?: { status?: string; overdue?: boolean }): Promise<{ invoices: Invoice[] }> {
+  async getInvoices(params?: { status?: string; overdue?: boolean; page?: number }): Promise<{ invoices: Invoice[]; pagination: PageInfo }> {
     const qs = new URLSearchParams();
+    if (params?.page) qs.append('page', String(params.page));
     if (params?.status && params.status !== 'All') qs.append('status', params.status);
     if (params?.overdue) qs.append('overdue', 'true');
     const url = `/billing/invoices${qs.toString() ? '?' + qs.toString() : ''}`;

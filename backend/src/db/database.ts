@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
 import fs from 'fs';
 import path from 'path';
 
@@ -76,17 +76,42 @@ export function resetDatabaseFile(customPath?: string): void {
 
 type Param = string | number | bigint | null;
 
+/**
+ * Prepared statements are compiled once per SQL text and reused (the hot paths run the same few
+ * statements thousands of times). SQLite re-prepares them transparently if the schema changes.
+ */
+const statements = new Map<string, StatementSync>();
+const MAX_CACHED_STATEMENTS = 500;
+
+let statementExecutions = 0;
+/** Number of statements executed so far (tests use it to prove list endpoints do not query per row). */
+export function getStatementCount(): number {
+  return statementExecutions;
+}
+
+function prepared(sql: string): StatementSync {
+  const db = getDb();
+  statementExecutions++;
+  let stmt = statements.get(sql);
+  if (!stmt) {
+    if (statements.size >= MAX_CACHED_STATEMENTS) statements.clear();
+    stmt = db.prepare(sql);
+    statements.set(sql, stmt);
+  }
+  return stmt;
+}
+
 export function queryAll<T = any>(sql: string, params: Param[] = []): T[] {
-  return getDb().prepare(sql).all(...params) as T[];
+  return prepared(sql).all(...params) as T[];
 }
 
 export function queryOne<T = any>(sql: string, params: Param[] = []): T | null {
-  const row = getDb().prepare(sql).get(...params);
+  const row = prepared(sql).get(...params);
   return (row as T | undefined) ?? null;
 }
 
 export function execute(sql: string, params: Param[] = []): { changes: number; lastInsertRowid: number | bigint } {
-  const result = getDb().prepare(sql).run(...params);
+  const result = prepared(sql).run(...params);
   return { changes: Number(result.changes), lastInsertRowid: result.lastInsertRowid };
 }
 
