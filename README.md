@@ -51,7 +51,7 @@ Sign in with these to test each role. Sign out and sign in as a customer to chec
 4. **Billing run:** **Preview** (saves nothing), **Run billing** (catch-up creates every missed period), **Run billing again** (0 created). The integrity panel shows 0 duplicate and 0 missing periods. **Confirm all drafts.**
 5. **Invoices:** open one (Subtotal − Discount + Tax = Total, then Paid and Outstanding). Record a partial payment, then the full balance: Confirmed → Paid.
 6. **Sign in as a customer:** only that customer's subscriptions, invoices and payments appear; pause, resume or renew a subscription. Another customer's invoice id returns 404.
-7. **Close with the evidence:** `npm test` (73 passing) and [docs/PERFORMANCE_RESULTS.md](docs/PERFORMANCE_RESULTS.md).
+7. **Close with the evidence:** `npm test` (73 passing), [docs/PERFORMANCE_RESULTS.md](docs/PERFORMANCE_RESULTS.md), and [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Architecture
 
