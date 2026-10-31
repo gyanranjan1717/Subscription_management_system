@@ -33,9 +33,13 @@ export function getDb(customPath?: string): DatabaseSync {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
   const hasUsers = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type='table' AND name='users'").get();
   if (hasUsers && row.user_version !== SCHEMA_VERSION) {
-    throw new Error(
-      `Database schema is outdated (found v${row.user_version}, need v${SCHEMA_VERSION}). Run "npm run seed" to rebuild it.`
-    );
+    if (row.user_version === 0) {
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
+    } else {
+      throw new Error(
+        `Database schema is outdated (found v${row.user_version}, need v${SCHEMA_VERSION}). Run "npm run seed" to rebuild it.`
+      );
+    }
   }
 
   applySchema(db);

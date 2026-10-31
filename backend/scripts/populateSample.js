@@ -21,6 +21,7 @@ if (fs.existsSync(schemaPath)) {
 } else if (fs.existsSync(distSchemaPath)) {
   db.exec(fs.readFileSync(distSchemaPath, 'utf8'));
 }
+db.exec('PRAGMA user_version = 3;');
 
 db.exec('PRAGMA foreign_keys = OFF;');
 
