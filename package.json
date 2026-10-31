@@ -10,6 +10,7 @@
     "clean": "npm --prefix backend run clean",
     "test": "npm --prefix backend test",
     "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "start": "node backend/dist/server.js",
     "benchmark": "npm --prefix backend run benchmark"
   },
   "keywords": [

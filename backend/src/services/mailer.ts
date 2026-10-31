@@ -1,13 +1,10 @@
 import nodemailer, { Transporter } from 'nodemailer';
 import dotenv from 'dotenv';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { execute } from '../db/database.js';
 
 // Ensure .env is always loaded with credentials regardless of launch folder
 try {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
   dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
   dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 } catch {
